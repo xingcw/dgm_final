@@ -1,4 +1,4 @@
-name: p2p
+name: dgm
 channels:
   - defaults
   - pytorch

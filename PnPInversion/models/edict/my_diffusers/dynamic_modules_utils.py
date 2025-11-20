@@ -22,7 +22,11 @@ import sys
 from pathlib import Path
 from typing import Dict, Optional, Union
 
-from huggingface_hub import cached_download
+try:
+    from huggingface_hub import hf_hub_download
+    cached_download = hf_hub_download  # For backward compatibility
+except ImportError:
+    from huggingface_hub import cached_download
 
 from .utils import DIFFUSERS_DYNAMIC_MODULE_NAME, HF_MODULES_CACHE, logging
 

@@ -4,14 +4,32 @@ from models.p2p.inversion import NegativePromptInversion, NullInversion, DirectI
 from models.p2p.attention_control import EmptyControl, AttentionStore, make_controller
 from models.p2p.p2p_guidance_forward import p2p_guidance_forward, direct_inversion_p2p_guidance_forward, direct_inversion_p2p_guidance_forward_add_target,p2p_guidance_forward_single_branch
 from models.p2p.proximal_guidance_forward import proximal_guidance_forward
-from diffusers import DiffusionPipeline
+from diffusers import StableDiffusionXLPipeline
 from utils.utils import load_512, load_768, load_1024, latent2image, txt_draw
 from PIL import Image
 import numpy as np
 import torch
 
+
+# Available enhanced text encoders for SDXL
+# SDXL text_encoder: 768-dim, text_encoder_2: 1280-dim
+ENHANCED_TEXT_ENCODERS = {
+    # OpenCLIP models trained on larger datasets
+    "openclip-bigg": {"type": "clip", "model": "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k"},
+    "openclip-h": {"type": "clip", "model": "laion/CLIP-ViT-H-14-laion2B-s32B-b79K"},
+    # LLM-based encoders with matching dimensions (no projection needed!)
+    # GPT-2 Large: 1280-dim - perfect match for text_encoder_2
+    "gpt2-large": {"type": "gpt2", "model": "gpt2-large", "dim": 1280},
+    # GPT-2 Small: 768-dim - could replace text_encoder (but less useful)
+    "gpt2-small": {"type": "gpt2", "model": "gpt2", "dim": 768},
+    # Default (no change)
+    "default": None,
+}
+
+
 class P2PEditor:
-    def __init__(self, method_list, device, num_ddim_steps=50, model_type="sdxl", low_memory=False) -> None:
+    def __init__(self, method_list, device, num_ddim_steps=50, model_type="sdxl", 
+                 low_memory=False, text_encoder_type="default") -> None:
         self.device = device
         self.method_list = method_list
         self.num_ddim_steps = num_ddim_steps
@@ -25,34 +43,48 @@ class P2PEditor:
         else:
             self.image_size = 512
         
-        # init model
-        self.scheduler = DDIMSchedulerDev(beta_start=0.00085,
-                                    beta_end=0.012,
-                                    beta_schedule="scaled_linear",
-                                    clip_sample=False,
-                                    set_alpha_to_one=False)
+        # init model - scheduler depends on model type
+        if model_type == "sd21":
+            # SD 2.1 uses v_prediction
+            self.scheduler = DDIMSchedulerDev(
+                beta_start=0.00085,
+                beta_end=0.012,
+                beta_schedule="scaled_linear",
+                clip_sample=False,
+                set_alpha_to_one=False,
+                prediction_type="v_prediction"  # SD 2.x uses v_prediction
+            )
+        else:
+            # SD 1.5 and SDXL use epsilon prediction
+            self.scheduler = DDIMSchedulerDev(
+                beta_start=0.00085,
+                beta_end=0.012,
+                beta_schedule="scaled_linear",
+                clip_sample=False,
+                set_alpha_to_one=False
+            )
         
         if model_type == "sdxl":
             # Load SDXL pipeline
-            self.ldm_stable = DiffusionPipeline.from_pretrained(
+            self.ldm_stable = StableDiffusionXLPipeline.from_pretrained(
                 "stabilityai/stable-diffusion-xl-base-1.0", 
-                torch_dtype=torch.float16, 
-                use_safetensors=True, 
+                scheduler=self.scheduler,
+                torch_dtype=torch.float16,
                 variant="fp16",
-                scheduler=self.scheduler
-            ).to(device, dtype=torch.float16)
+                use_safetensors=True
+            )
             self.ldm_stable.is_sdxl = True
         elif model_type == "sd21":
-            # Load SD 2.1 pipeline
+            # Load SD 2.1 pipeline - uses v_prediction
             from diffusers import StableDiffusionPipeline
             self.ldm_stable = StableDiffusionPipeline.from_pretrained(
-                "stabilityai/stable-diffusion-2-1",
+                "sd2-community/stable-diffusion-2",
                 scheduler=self.scheduler,
                 torch_dtype=torch.float16,
             )
             self.ldm_stable.is_sdxl = False
-        else:
-            # Load SD 1.5 pipeline (original)
+        elif model_type == "sd15":
+            # Load SD 1.5 pipeline
             from diffusers import StableDiffusionPipeline
             self.ldm_stable = StableDiffusionPipeline.from_pretrained(
                 "runwayml/stable-diffusion-v1-5",
@@ -60,6 +92,19 @@ class P2PEditor:
                 torch_dtype=torch.float16,
             )
             self.ldm_stable.is_sdxl = False
+        else:
+            # Load SD 1.4 pipeline
+            from diffusers import StableDiffusionPipeline
+            self.ldm_stable = StableDiffusionPipeline.from_pretrained(
+                "CompVis/stable-diffusion-v1-4",
+                scheduler=self.scheduler,
+                torch_dtype=torch.float16,
+            )
+            self.ldm_stable.is_sdxl = False
+        
+        # Optionally swap text encoder for SDXL with a better one
+        if model_type == "sdxl" and text_encoder_type != "default":
+            self._load_enhanced_text_encoder(text_encoder_type, device)
         
         # Memory optimizations
         if low_memory:
@@ -89,6 +134,171 @@ class P2PEditor:
             return load_768(image_path)
         else:
             return load_512(image_path)
+    
+    def _load_enhanced_text_encoder(self, encoder_type, device):
+        """
+        Load an enhanced text encoder for SDXL.
+        
+        SDXL uses two text encoders:
+        - text_encoder: CLIP ViT-L/14 (768-dim output)
+        - text_encoder_2: OpenCLIP ViT-bigG/14 (1280-dim output, pooled output used)
+        
+        Options:
+        1. CLIP-based: Swap with different OpenCLIP models
+        2. LLM-based: Use GPT-2 Large (1280-dim) - exact dimension match!
+        """
+        encoder_config = ENHANCED_TEXT_ENCODERS.get(encoder_type)
+        if encoder_config is None:
+            print(f"Unknown encoder type: {encoder_type}. Using default.")
+            return
+        
+        encoder_model = encoder_config["model"]
+        encoder_class = encoder_config["type"]
+        
+        print(f"Loading enhanced text encoder: {encoder_model} (type: {encoder_class})")
+        
+        try:
+            if encoder_class == "clip":
+                self._load_clip_encoder(encoder_model)
+            elif encoder_class == "gpt2":
+                self._load_gpt2_encoder(encoder_model, encoder_config.get("dim", 1280))
+            else:
+                print(f"Unknown encoder class: {encoder_class}")
+                return
+                
+        except Exception as e:
+            print(f"Failed to load enhanced encoder: {e}")
+            import traceback
+            traceback.print_exc()
+            print("Falling back to default encoder.")
+    
+    def _load_clip_encoder(self, model_name):
+        """Load a CLIP-based text encoder."""
+        from transformers import CLIPTextModelWithProjection, CLIPTokenizer
+        
+        new_text_encoder = CLIPTextModelWithProjection.from_pretrained(
+            model_name,
+            torch_dtype=torch.float16
+        )
+        new_tokenizer = CLIPTokenizer.from_pretrained(model_name)
+        
+        expected_dim = 1280
+        actual_dim = new_text_encoder.config.projection_dim
+        
+        if actual_dim != expected_dim:
+            print(f"WARNING: Encoder output dim {actual_dim} != expected {expected_dim}.")
+        
+        self.ldm_stable.text_encoder_2 = new_text_encoder
+        self.ldm_stable.tokenizer_2 = new_tokenizer
+        
+        print(f"Successfully loaded CLIP encoder: {model_name}")
+        print(f"  Output dim: {actual_dim}")
+    
+    def _load_gpt2_encoder(self, model_name, expected_dim):
+        """
+        Load GPT-2 as text encoder for SDXL.
+        
+        GPT-2 Large has 1280-dim hidden states - exact match for text_encoder_2!
+        This requires wrapping GPT-2 to match the expected interface.
+        """
+        from transformers import GPT2Model, GPT2Tokenizer
+        
+        print(f"Loading GPT-2 model: {model_name}")
+        
+        # Load GPT-2
+        gpt2_model = GPT2Model.from_pretrained(model_name, torch_dtype=torch.float16)
+        gpt2_tokenizer = GPT2Tokenizer.from_pretrained(model_name)
+        
+        # GPT-2 doesn't have a pad token by default, use eos_token
+        gpt2_tokenizer.pad_token = gpt2_tokenizer.eos_token
+        # Set model_max_length to match CLIP's (77 tokens) for compatibility
+        gpt2_tokenizer.model_max_length = 77
+        
+        actual_dim = gpt2_model.config.hidden_size
+        print(f"GPT-2 hidden size: {actual_dim}, expected: {expected_dim}")
+        
+        if actual_dim != expected_dim:
+            print(f"WARNING: Dimension mismatch! {actual_dim} != {expected_dim}")
+            print("This will likely cause errors.")
+            return
+        
+        # Output class that mimics CLIP's output format (subscriptable + attributes)
+        class GPT2EncoderOutput:
+            """Output class that mimics CLIPTextModelWithProjection output format."""
+            def __init__(self, text_embeds, last_hidden_state, hidden_states_list):
+                self.text_embeds = text_embeds  # Pooled output
+                self.last_hidden_state = last_hidden_state
+                self.hidden_states = hidden_states_list  # Tuple of hidden states
+                
+            def __getitem__(self, idx):
+                # CLIP output[0] returns text_embeds (pooled output)
+                if idx == 0:
+                    return self.text_embeds
+                raise IndexError(f"Index {idx} out of range")
+        
+        # Create wrapper that matches SDXL's expected interface
+        class GPT2TextEncoderWrapper(torch.nn.Module):
+            """Wrapper to make GPT-2 compatible with SDXL's text_encoder_2 interface."""
+            
+            def __init__(self, gpt2_model, hidden_size):
+                super().__init__()
+                self.model = gpt2_model
+                self.config = type('Config', (), {
+                    'hidden_size': hidden_size,
+                    'projection_dim': hidden_size,  # For compatibility
+                })()
+                self.dtype = next(gpt2_model.parameters()).dtype
+            
+            def forward(self, input_ids, attention_mask=None, output_hidden_states=False, **kwargs):
+                # GPT-2 forward pass
+                outputs = self.model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    output_hidden_states=True,  # Always get hidden states for compatibility
+                )
+                
+                # Get last hidden states
+                last_hidden_state = outputs.last_hidden_state
+                
+                # For pooled output, use the last non-padding token (like GPT-2 does)
+                # Find the last token position for each sequence
+                if attention_mask is not None:
+                    sequence_lengths = attention_mask.sum(dim=1) - 1
+                else:
+                    sequence_lengths = torch.full(
+                        (input_ids.shape[0],), 
+                        input_ids.shape[1] - 1, 
+                        device=input_ids.device
+                    )
+                
+                # Get the embedding at the last position (pooled output)
+                batch_size = last_hidden_state.shape[0]
+                pooled_output = last_hidden_state[
+                    torch.arange(batch_size, device=last_hidden_state.device),
+                    sequence_lengths.long()
+                ]
+                
+                # Return in format expected by SDXL (mimics CLIP output)
+                # CLIP output: output[0] = text_embeds, output.hidden_states[-2] = penultimate hidden state
+                return GPT2EncoderOutput(
+                    text_embeds=pooled_output,
+                    last_hidden_state=last_hidden_state,
+                    hidden_states_list=outputs.hidden_states,  # Tuple of all hidden states
+                )
+        
+        # Create wrapped model
+        wrapped_encoder = GPT2TextEncoderWrapper(gpt2_model, actual_dim)
+        
+        # Replace text_encoder_2
+        self.ldm_stable.text_encoder_2 = wrapped_encoder
+        self.ldm_stable.tokenizer_2 = gpt2_tokenizer
+        
+        # Mark that we're using GPT-2 (for potential special handling)
+        self.ldm_stable.uses_gpt2_encoder = True
+        
+        print(f"Successfully loaded GPT-2 encoder!")
+        print(f"  Model: {model_name}")
+        print(f"  Hidden dim: {actual_dim} (exact match for SDXL!)")
         
     def __call__(self, 
                 edit_method,
@@ -249,7 +459,8 @@ class P2PEditor:
                                     equilizer_params=eq_params,
                                     num_ddim_steps=self.num_ddim_steps,
                                     device=self.device,
-                                    is_sdxl=self.use_sdxl)
+                                    is_sdxl=self.use_sdxl,
+                                    image_size=self.image_size)
         latents, _ = p2p_guidance_forward(model=self.ldm_stable, 
                                        prompt=prompts, 
                                        controller=controller, 
@@ -313,7 +524,8 @@ class P2PEditor:
                                     equilizer_params=eq_params,
                                     num_ddim_steps=self.num_ddim_steps,
                                     device=self.device,
-                                    is_sdxl=self.use_sdxl)
+                                    is_sdxl=self.use_sdxl,
+                                    image_size=self.image_size)
         latents, _ = p2p_guidance_forward(model=self.ldm_stable, 
                                        prompt=prompts, 
                                        controller=controller, 
@@ -377,7 +589,8 @@ class P2PEditor:
                                     equilizer_params=eq_params,
                                     num_ddim_steps=self.num_ddim_steps,
                                     device=self.device,
-                                    is_sdxl=self.use_sdxl)
+                                    is_sdxl=self.use_sdxl,
+                                    image_size=self.image_size)
         latents, _ = p2p_guidance_forward_single_branch(model=self.ldm_stable, 
                                        prompt=prompts, 
                                        controller=controller, 
@@ -458,7 +671,8 @@ class P2PEditor:
                                     equilizer_params=eq_params,
                                     num_ddim_steps=self.num_ddim_steps,
                                     device=self.device,
-                                    is_sdxl=self.use_sdxl)
+                                    is_sdxl=self.use_sdxl,
+                                    image_size=self.image_size)
         
         
         latents, _ = proximal_guidance_forward(
@@ -534,7 +748,8 @@ class P2PEditor:
                                     equilizer_params=eq_params,
                                     num_ddim_steps=self.num_ddim_steps,
                                     device=self.device,
-                                    is_sdxl=self.use_sdxl)
+                                    is_sdxl=self.use_sdxl,
+                                    image_size=self.image_size)
         
         latents, _ = direct_inversion_p2p_guidance_forward(model=self.ldm_stable, 
                                        prompt=prompts, 
@@ -604,7 +819,8 @@ class P2PEditor:
                                     equilizer_params=eq_params,
                                     num_ddim_steps=self.num_ddim_steps,
                                     device=self.device,
-                                    is_sdxl=self.use_sdxl)
+                                    is_sdxl=self.use_sdxl,
+                                    image_size=self.image_size)
         
         latents, _ = direct_inversion_p2p_guidance_forward(model=self.ldm_stable, 
                                        prompt=prompts, 
@@ -689,7 +905,8 @@ class P2PEditor:
                                     equilizer_params=eq_params,
                                     num_ddim_steps=self.num_ddim_steps,
                                     device=self.device,
-                                    is_sdxl=self.use_sdxl)
+                                    is_sdxl=self.use_sdxl,
+                                    image_size=self.image_size)
         
         
         latents, _ = proximal_guidance_forward(
@@ -765,7 +982,8 @@ class P2PEditor:
                                     equilizer_params=eq_params,
                                     num_ddim_steps=self.num_ddim_steps,
                                     device=self.device,
-                                    is_sdxl=self.use_sdxl)
+                                    is_sdxl=self.use_sdxl,
+                                    image_size=self.image_size)
         
         latents, _ = direct_inversion_p2p_guidance_forward(model=self.ldm_stable, 
                                        prompt=prompts, 
@@ -835,7 +1053,8 @@ class P2PEditor:
                                     equilizer_params=eq_params,
                                     num_ddim_steps=self.num_ddim_steps,
                                     device=self.device,
-                                    is_sdxl=self.use_sdxl)
+                                    is_sdxl=self.use_sdxl,
+                                    image_size=self.image_size)
         
         latents, _ = direct_inversion_p2p_guidance_forward(model=self.ldm_stable, 
                                        prompt=prompts, 
@@ -905,7 +1124,8 @@ class P2PEditor:
                                     equilizer_params=eq_params,
                                     num_ddim_steps=self.num_ddim_steps,
                                     device=self.device,
-                                    is_sdxl=self.use_sdxl)
+                                    is_sdxl=self.use_sdxl,
+                                    image_size=self.image_size)
         
         latents, _ = direct_inversion_p2p_guidance_forward(model=self.ldm_stable, 
                                        prompt=prompts, 
@@ -973,7 +1193,8 @@ class P2PEditor:
                                     equilizer_params=eq_params,
                                     num_ddim_steps=self.num_ddim_steps,
                                     device=self.device,
-                                    is_sdxl=self.use_sdxl)
+                                    is_sdxl=self.use_sdxl,
+                                    image_size=self.image_size)
         
         latents, _ = direct_inversion_p2p_guidance_forward_add_target(model=self.ldm_stable, 
                                        prompt=prompts, 
@@ -1047,7 +1268,8 @@ class P2PEditor:
                                     equilizer_params=eq_params,
                                     num_ddim_steps=self.num_ddim_steps,
                                     device=self.device,
-                                    is_sdxl=self.use_sdxl)
+                                    is_sdxl=self.use_sdxl,
+                                    image_size=self.image_size)
         
         latents, _ = direct_inversion_p2p_guidance_forward_add_target(model=self.ldm_stable, 
                                        prompt=prompts, 

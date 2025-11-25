@@ -5,6 +5,32 @@ from models.p2p.inversion import encode_prompt_sdxl, get_sdxl_unet_kwargs
 from utils.utils import init_latent
 
 
+def get_model_image_size(model):
+    """Get the appropriate image size based on model type."""
+    is_sdxl = getattr(model, 'is_sdxl', False)
+    
+    if is_sdxl:
+        return 1024
+    
+    # Check for SD 2.1 by looking at model config or VAE sample size
+    try:
+        # SD 2.1 uses 768x768
+        if hasattr(model, 'vae') and hasattr(model.vae.config, 'sample_size'):
+            vae_sample_size = model.vae.config.sample_size
+            if vae_sample_size == 96:  # 768/8 = 96
+                return 768
+        # Also check unet sample size
+        if hasattr(model, 'unet') and hasattr(model.unet.config, 'sample_size'):
+            unet_sample_size = model.unet.config.sample_size
+            if unet_sample_size == 96:  # 768/8 = 96
+                return 768
+    except:
+        pass
+    
+    # Default to SD 1.5 size
+    return 512
+
+
 def p2p_guidance_diffusion_step(model, controller, latents, context, t, guidance_scale, 
                                  low_resource=False, added_cond_kwargs=None):
     is_sdxl = getattr(model, 'is_sdxl', False)
@@ -52,7 +78,7 @@ def p2p_guidance_forward(
     batch_size = len(prompt)
     register_attention_control(model, controller)
     is_sdxl = getattr(model, 'is_sdxl', False)
-    height = width = 1024 if is_sdxl else 512
+    height = width = get_model_image_size(model)
     
     added_cond_kwargs = None
     
@@ -116,7 +142,7 @@ def p2p_guidance_forward_single_branch(
     batch_size = len(prompt)
     register_attention_control(model, controller)
     is_sdxl = getattr(model, 'is_sdxl', False)
-    height = width = 1024 if is_sdxl else 512
+    height = width = get_model_image_size(model)
     
     added_cond_kwargs = None
     
@@ -242,7 +268,7 @@ def direct_inversion_p2p_guidance_forward(
     batch_size = len(prompt)
     register_attention_control(model, controller)
     is_sdxl = getattr(model, 'is_sdxl', False)
-    height = width = 1024 if is_sdxl else 512
+    height = width = get_model_image_size(model)
     
     added_cond_kwargs = None
     
@@ -297,7 +323,7 @@ def direct_inversion_p2p_guidance_forward_add_target(
     batch_size = len(prompt)
     register_attention_control(model, controller)
     is_sdxl = getattr(model, 'is_sdxl', False)
-    height = width = 1024 if is_sdxl else 512
+    height = width = get_model_image_size(model)
     
     added_cond_kwargs = None
     

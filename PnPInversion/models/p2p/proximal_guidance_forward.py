@@ -2,6 +2,7 @@ import torch
 import torch.nn.functional as F
 
 from models.p2p.attention_control import register_attention_control
+from models.p2p.p2p_guidance_forward import get_model_image_size
 from utils.utils import init_latent
 
 def dilate(image, kernel_size, stride=1, padding=0):
@@ -129,7 +130,7 @@ def proximal_guidance_forward(
     """
     batch_size = len(prompt)
     register_attention_control(model, controller)
-    height = width = 512
+    height = width = get_model_image_size(model)
     
     text_input = model.tokenizer(
         prompt,

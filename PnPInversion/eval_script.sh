@@ -1,15 +1,17 @@
 #! /bin/bash
 
-# export CUDA_DEVICE_ORDER=PCI_BUS_ID
-# export CUDA_VISIBLE_DEVICES=0
+export CUDA_DEVICE_ORDER=PCI_BUS_ID
+export CUDA_VISIBLE_DEVICES=0
 
-# cd PnPInversion || exit 1
+cd PnPInversion || exit 1
 
 python run_editing_p2p.py \
-    --output_path output \
+    --output_path output/sd14/default \
     --edit_category_list 0 1 2 3 4 5 6 7 8 9 \
     --edit_method_list directinversion+p2p \
-    --data_path data
+    --data_path data \
+    --model_type sd14 \
+    --text_encoder default
 
 
 # python evaluation/evaluate.py --metrics "structure_distance" \

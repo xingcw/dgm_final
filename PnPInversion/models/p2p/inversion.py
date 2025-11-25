@@ -8,6 +8,41 @@ from models.p2p.attention_control import register_attention_control
 from utils.utils import slerp_tensor, image2latent, latent2image
 
 
+def get_pred_original_sample(model_output, sample, alpha_prod_t, beta_prod_t, prediction_type):
+    """
+    Convert model output to predicted original sample based on prediction type.
+    
+    Args:
+        model_output: The direct output from the UNet
+        sample: The noisy sample (x_t)
+        alpha_prod_t: Cumulative product of alphas at timestep t
+        beta_prod_t: 1 - alpha_prod_t
+        prediction_type: "epsilon" or "v_prediction"
+    """
+    if prediction_type == "epsilon":
+        pred_original_sample = (sample - beta_prod_t ** 0.5 * model_output) / alpha_prod_t ** 0.5
+    elif prediction_type == "v_prediction":
+        pred_original_sample = (alpha_prod_t ** 0.5) * sample - (beta_prod_t ** 0.5) * model_output
+    else:
+        raise ValueError(f"Unknown prediction type: {prediction_type}")
+    return pred_original_sample
+
+
+def get_noise_for_direction(model_output, sample, alpha_prod_t, beta_prod_t, prediction_type):
+    """
+    Get the noise/direction component for DDIM step based on prediction type.
+    For epsilon prediction, this is just the model_output.
+    For v_prediction, we need to convert v to epsilon.
+    """
+    if prediction_type == "epsilon":
+        return model_output
+    elif prediction_type == "v_prediction":
+        # Convert v_prediction to epsilon: eps = sqrt(alpha) * v + sqrt(beta) * x
+        return (alpha_prod_t ** 0.5) * model_output + (beta_prod_t ** 0.5) * sample
+    else:
+        raise ValueError(f"Unknown prediction type: {prediction_type}")
+
+
 def encode_prompt_sdxl(model, prompt, device):
     """
     Encode prompts using SDXL's dual text encoders.
@@ -89,8 +124,11 @@ class NegativePromptInversion:
         alpha_prod_t = self.scheduler.alphas_cumprod[timestep]
         alpha_prod_t_prev = self.scheduler.alphas_cumprod[prev_timestep] if prev_timestep >= 0 else self.scheduler.final_alpha_cumprod
         beta_prod_t = 1 - alpha_prod_t
-        pred_original_sample = (sample - beta_prod_t ** 0.5 * model_output) / alpha_prod_t ** 0.5
-        pred_sample_direction = (1 - alpha_prod_t_prev) ** 0.5 * model_output
+        prediction_type = self.scheduler.config.prediction_type
+        
+        pred_original_sample = get_pred_original_sample(model_output, sample, alpha_prod_t, beta_prod_t, prediction_type)
+        noise_for_direction = get_noise_for_direction(model_output, sample, alpha_prod_t, beta_prod_t, prediction_type)
+        pred_sample_direction = (1 - alpha_prod_t_prev) ** 0.5 * noise_for_direction
         prev_sample = alpha_prod_t_prev ** 0.5 * pred_original_sample + pred_sample_direction
         return prev_sample
     
@@ -99,8 +137,11 @@ class NegativePromptInversion:
         alpha_prod_t = self.scheduler.alphas_cumprod[timestep] if timestep >= 0 else self.scheduler.final_alpha_cumprod
         alpha_prod_t_next = self.scheduler.alphas_cumprod[next_timestep]
         beta_prod_t = 1 - alpha_prod_t
-        next_original_sample = (sample - beta_prod_t ** 0.5 * model_output) / alpha_prod_t ** 0.5
-        next_sample_direction = (1 - alpha_prod_t_next) ** 0.5 * model_output
+        prediction_type = self.scheduler.config.prediction_type
+        
+        next_original_sample = get_pred_original_sample(model_output, sample, alpha_prod_t, beta_prod_t, prediction_type)
+        noise_for_direction = get_noise_for_direction(model_output, sample, alpha_prod_t, beta_prod_t, prediction_type)
+        next_sample_direction = (1 - alpha_prod_t_next) ** 0.5 * noise_for_direction
         next_sample = alpha_prod_t_next ** 0.5 * next_original_sample + next_sample_direction
         return next_sample
     
@@ -226,8 +267,11 @@ class NullInversion:
         alpha_prod_t = self.scheduler.alphas_cumprod[timestep]
         alpha_prod_t_prev = self.scheduler.alphas_cumprod[prev_timestep] if prev_timestep >= 0 else self.scheduler.final_alpha_cumprod
         beta_prod_t = 1 - alpha_prod_t
-        pred_original_sample = (sample - beta_prod_t ** 0.5 * model_output) / alpha_prod_t ** 0.5
-        pred_sample_direction = (1 - alpha_prod_t_prev) ** 0.5 * model_output
+        prediction_type = self.scheduler.config.prediction_type
+        
+        pred_original_sample = get_pred_original_sample(model_output, sample, alpha_prod_t, beta_prod_t, prediction_type)
+        noise_for_direction = get_noise_for_direction(model_output, sample, alpha_prod_t, beta_prod_t, prediction_type)
+        pred_sample_direction = (1 - alpha_prod_t_prev) ** 0.5 * noise_for_direction
         prev_sample = alpha_prod_t_prev ** 0.5 * pred_original_sample + pred_sample_direction
         return prev_sample
     
@@ -236,8 +280,11 @@ class NullInversion:
         alpha_prod_t = self.scheduler.alphas_cumprod[timestep] if timestep >= 0 else self.scheduler.final_alpha_cumprod
         alpha_prod_t_next = self.scheduler.alphas_cumprod[next_timestep]
         beta_prod_t = 1 - alpha_prod_t
-        next_original_sample = (sample - beta_prod_t ** 0.5 * model_output) / alpha_prod_t ** 0.5
-        next_sample_direction = (1 - alpha_prod_t_next) ** 0.5 * model_output
+        prediction_type = self.scheduler.config.prediction_type
+        
+        next_original_sample = get_pred_original_sample(model_output, sample, alpha_prod_t, beta_prod_t, prediction_type)
+        noise_for_direction = get_noise_for_direction(model_output, sample, alpha_prod_t, beta_prod_t, prediction_type)
+        next_sample_direction = (1 - alpha_prod_t_next) ** 0.5 * noise_for_direction
         next_sample = alpha_prod_t_next ** 0.5 * next_original_sample + next_sample_direction
         return next_sample
     
@@ -408,23 +455,31 @@ class DirectInversion:
         alpha_prod_t = self.scheduler.alphas_cumprod[timestep]
         alpha_prod_t_prev = self.scheduler.alphas_cumprod[prev_timestep] if prev_timestep >= 0 else self.scheduler.final_alpha_cumprod
         beta_prod_t = 1 - alpha_prod_t
-        pred_original_sample = (sample - beta_prod_t ** 0.5 * model_output) / alpha_prod_t ** 0.5
-        pred_sample_direction = (1 - alpha_prod_t_prev) ** 0.5 * model_output
+        prediction_type = self.scheduler.config.prediction_type
+        
+        pred_original_sample = get_pred_original_sample(model_output, sample, alpha_prod_t, beta_prod_t, prediction_type)
+        noise_for_direction = get_noise_for_direction(model_output, sample, alpha_prod_t, beta_prod_t, prediction_type)
+        pred_sample_direction = (1 - alpha_prod_t_prev) ** 0.5 * noise_for_direction
         prev_sample = alpha_prod_t_prev ** 0.5 * pred_original_sample + pred_sample_direction
         
-        difference_scale_pred_original_sample= - beta_prod_t ** 0.5  / alpha_prod_t ** 0.5
+        # Calculate difference scale for epsilon prediction (used for offset calculation)
+        # For v_prediction, we use the converted epsilon
+        difference_scale_pred_original_sample = - beta_prod_t ** 0.5 / alpha_prod_t ** 0.5
         difference_scale_pred_sample_direction = (1 - alpha_prod_t_prev) ** 0.5 
         difference_scale = alpha_prod_t_prev ** 0.5 * difference_scale_pred_original_sample + difference_scale_pred_sample_direction
         
-        return prev_sample,difference_scale
+        return prev_sample, difference_scale
     
     def next_step(self, model_output, timestep: int, sample):
         timestep, next_timestep = min(timestep - self.scheduler.config.num_train_timesteps // self.scheduler.num_inference_steps, 999), timestep
         alpha_prod_t = self.scheduler.alphas_cumprod[timestep] if timestep >= 0 else self.scheduler.final_alpha_cumprod
         alpha_prod_t_next = self.scheduler.alphas_cumprod[next_timestep]
         beta_prod_t = 1 - alpha_prod_t
-        next_original_sample = (sample - beta_prod_t ** 0.5 * model_output) / alpha_prod_t ** 0.5
-        next_sample_direction = (1 - alpha_prod_t_next) ** 0.5 * model_output
+        prediction_type = self.scheduler.config.prediction_type
+        
+        next_original_sample = get_pred_original_sample(model_output, sample, alpha_prod_t, beta_prod_t, prediction_type)
+        noise_for_direction = get_noise_for_direction(model_output, sample, alpha_prod_t, beta_prod_t, prediction_type)
+        next_sample_direction = (1 - alpha_prod_t_next) ** 0.5 * noise_for_direction
         next_sample = alpha_prod_t_next ** 0.5 * next_original_sample + next_sample_direction
         return next_sample
     

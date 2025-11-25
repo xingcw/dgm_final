@@ -213,25 +213,117 @@ class LocalBlend:
     def __call__(self, x_t, attention_store):
         self.counter += 1
         if self.counter > self.start_blend:
-            # Skip local blend for SDXL - attention map structure is incompatible
-            if self.is_sdxl:
-                return x_t
+            # Debug: print once per run
+            # if self.counter == self.start_blend + 1:
+                # print(f"[LocalBlend] Starting blend at step {self.counter}, is_sdxl={self.is_sdxl}")
+                # print(f"[LocalBlend] down_cross count: {len(attention_store.get('down_cross', []))}")
+                # print(f"[LocalBlend] up_cross count: {len(attention_store.get('up_cross', []))}")
+                # if attention_store.get('down_cross'):
+                #     print(f"[LocalBlend] down_cross shapes: {[x.shape for x in attention_store['down_cross']]}")
+                # if attention_store.get('up_cross'):
+                #     print(f"[LocalBlend] up_cross shapes: {[x.shape for x in attention_store['up_cross']]}")
             
-            maps = attention_store["down_cross"][2:4] + attention_store["up_cross"][:3]
-            # Compute attention map spatial size dynamically
-            attn_size = self.attn_res
-            maps = [item.reshape(self.alpha_layers.shape[0], -1, 1, attn_size, attn_size, MAX_NUM_WORDS) for item in maps]
-            maps = torch.cat(maps, dim=1)
-            mask = self.get_mask(maps, self.alpha_layers, True)
-            if self.substruct_layers is not None:
-                maps_sub = ~self.get_mask(maps, self.substruct_layers, False)
-                mask = mask * maps_sub
-            mask = mask.float()
-            x_t = x_t[:1] + mask * (x_t - x_t[:1])
+            try:
+                if self.is_sdxl:
+                    # SDXL has different attention map structure
+                    # Use attention maps that match the expected spatial resolution
+                    all_cross = attention_store.get("down_cross", []) + attention_store.get("up_cross", [])
+                    
+                    if len(all_cross) == 0:
+                        if self.counter == self.start_blend + 1:
+                            print("[LocalBlend] WARNING: No cross attention maps found!")
+                        return x_t
+                    
+                    # Filter maps by spatial size - we want maps close to our target attention resolution
+                    target_size = self.attn_res * self.attn_res  # 32*32 = 1024 for SDXL
+                    filtered_maps = []
+                    for item in all_cross:
+                        spatial_size = item.shape[1]  # [batch*heads, spatial, tokens]
+                        # Accept maps within a reasonable range
+                        if target_size // 4 <= spatial_size <= target_size * 4:
+                            filtered_maps.append(item)
+                    
+                    if self.counter == self.start_blend + 1:
+                        print(f"[LocalBlend] Target size: {target_size}, filtered {len(filtered_maps)} maps from {len(all_cross)}")
+                    
+                    if len(filtered_maps) == 0:
+                        # No suitable maps found, skip blending
+                        if self.counter == self.start_blend + 1:
+                            print("[LocalBlend] WARNING: No maps passed filter!")
+                        return x_t
+                    
+                    # Reshape and interpolate maps to target size
+                    processed_maps = []
+                    for item in filtered_maps:
+                        # Infer spatial dimensions
+                        spatial_size = item.shape[1]
+                        spatial_dim = int(spatial_size ** 0.5)
+                        if spatial_dim * spatial_dim != spatial_size:
+                            continue  # Skip non-square maps
+                        
+                        # Reshape: [batch*heads, spatial, tokens] -> [batch, heads, h, w, tokens]
+                        batch_heads = item.shape[0]
+                        num_heads = batch_heads // self.alpha_layers.shape[0]
+                        if num_heads == 0:
+                            continue
+                        reshaped = item.reshape(self.alpha_layers.shape[0], num_heads, spatial_dim, spatial_dim, -1)
+                        
+                        # Interpolate to target resolution if needed
+                        if spatial_dim != self.attn_res:
+                            # Reshape for interpolation: [batch, heads*tokens, h, w]
+                            b, h, sy, sx, t = reshaped.shape
+                            reshaped = reshaped.permute(0, 1, 4, 2, 3).reshape(b, h * t, sy, sx)
+                            reshaped = nnf.interpolate(reshaped, size=(self.attn_res, self.attn_res), mode='bilinear')
+                            reshaped = reshaped.reshape(b, h, t, self.attn_res, self.attn_res).permute(0, 1, 3, 4, 2)
+                        
+                        # Ensure token dimension matches MAX_NUM_WORDS
+                        if reshaped.shape[-1] < MAX_NUM_WORDS:
+                            pad_size = MAX_NUM_WORDS - reshaped.shape[-1]
+                            reshaped = nnf.pad(reshaped, (0, pad_size))
+                        elif reshaped.shape[-1] > MAX_NUM_WORDS:
+                            reshaped = reshaped[..., :MAX_NUM_WORDS]
+                        
+                        # Reshape to expected format: [batch, heads, 1, attn_res, attn_res, MAX_NUM_WORDS]
+                        reshaped = reshaped.unsqueeze(2)
+                        processed_maps.append(reshaped)
+                    
+                    if len(processed_maps) == 0:
+                        if self.counter == self.start_blend + 1:
+                            print("[LocalBlend] WARNING: No maps could be processed!")
+                        return x_t
+                    
+                    if self.counter == self.start_blend + 1:
+                        print(f"[LocalBlend] Processed {len(processed_maps)} maps successfully")
+                    
+                    maps = torch.cat(processed_maps, dim=1)
+                else:
+                    # Original SD1.5 logic
+                    maps = attention_store["down_cross"][2:4] + attention_store["up_cross"][:3]
+                    attn_size = self.attn_res
+                    maps = [item.reshape(self.alpha_layers.shape[0], -1, 1, attn_size, attn_size, MAX_NUM_WORDS) for item in maps]
+                    maps = torch.cat(maps, dim=1)
+                
+                mask = self.get_mask(maps, self.alpha_layers, True)
+                if self.substruct_layers is not None:
+                    maps_sub = ~self.get_mask(maps, self.substruct_layers, False)
+                    mask = mask * maps_sub
+                mask = mask.float()
+                
+                if self.counter == self.start_blend + 1:
+                    print(f"[LocalBlend] Mask shape: {mask.shape}, min: {mask.min():.3f}, max: {mask.max():.3f}")
+                
+                x_t = x_t[:1] + mask * (x_t - x_t[:1])
+            except Exception as e:
+                # If anything goes wrong, don't crash - just skip blending
+                import warnings
+                import traceback
+                warnings.warn(f"LocalBlend failed: {e}. Skipping background preservation.")
+                if self.counter == self.start_blend + 1:
+                    traceback.print_exc()
         return x_t
 
     def __init__(self, prompts, words, substruct_words=None, start_blend=0.2, th=(.3, .3),
-                 tokenizer=None, device="cuda", num_ddim_steps=50, is_sdxl=False):
+                 tokenizer=None, device="cuda", num_ddim_steps=50, is_sdxl=False, image_size=512):
         alpha_layers = torch.zeros(len(prompts),  1, 1, 1, 1, MAX_NUM_WORDS)
         for i, (prompt, words_) in enumerate(zip(prompts, words)):
             if type(words_) is str:
@@ -256,13 +348,11 @@ class LocalBlend:
         self.counter = 0 
         self.th = th
         self.is_sdxl = is_sdxl
-        # Set latent size and attention resolution based on model type
-        if is_sdxl:
-            self.latent_size = (128, 128)  # 1024/8 = 128
-            self.attn_res = 32  # SDXL attention map resolution
-        else:
-            self.latent_size = (64, 64)  # 512/8 = 64
-            self.attn_res = 16  # SD 1.5 attention map resolution
+        # Set latent size based on image_size (latent = image / 8)
+        latent_dim = image_size // 8
+        self.latent_size = (latent_dim, latent_dim)
+        # Set attention resolution (typically latent_dim / 4 for most attention layers)
+        self.attn_res = latent_dim // 4 if is_sdxl else latent_dim // 4
         
         
 class EmptyControl:
@@ -338,7 +428,9 @@ class AttentionStore(AttentionControl):
 
     def forward(self, attn, is_cross, place_in_unet):
         key = f"{place_in_unet}_{'cross' if is_cross else 'self'}"
-        if attn.shape[1] <= 32 ** 2:  # avoid memory overhead
+        # Store attention maps up to 64x64 spatial resolution (was 32x32)
+        # This is important for SDXL which has higher resolution attention maps
+        if attn.shape[1] <= 64 ** 2:  # 4096 spatial elements
             self.step_store[key].append(attn)
         return attn
 
@@ -490,12 +582,13 @@ def make_controller(pipeline,
                     equilizer_params=None, 
                     num_ddim_steps=50,
                     device="cuda",
-                    is_sdxl=False) -> AttentionControlEdit:
+                    is_sdxl=False,
+                    image_size=512) -> AttentionControlEdit:
     if blend_words is None:
         lb = None
     else:
         lb = LocalBlend(prompts, blend_words, tokenizer=pipeline.tokenizer, device=device, 
-                        num_ddim_steps=num_ddim_steps, is_sdxl=is_sdxl)
+                        num_ddim_steps=num_ddim_steps, is_sdxl=is_sdxl, image_size=image_size)
     if is_replace_controller:
         controller = AttentionReplace(prompts, 
                                       num_ddim_steps, 

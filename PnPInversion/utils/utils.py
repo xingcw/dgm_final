@@ -109,16 +109,24 @@ def init_latent(latent, model, height, width, generator, batch_size):
 VAE_SCALING_FACTOR_SD15 = 0.18215
 VAE_SCALING_FACTOR_SDXL = 0.13025
 
+def get_vae_scaling_factor(model):
+    """Get the appropriate VAE scaling factor based on model type."""
+    is_sdxl = getattr(model, 'is_sdxl', False)
+    if is_sdxl:
+        return VAE_SCALING_FACTOR_SDXL
+    else:
+        return VAE_SCALING_FACTOR_SD15
+
 @torch.no_grad()
 def latent2image(model, latents, return_type='np', is_sdxl=None):
     # Handle both pipeline and VAE being passed
     vae = model.vae if hasattr(model, 'vae') else model
     
-    # Auto-detect SDXL based on model attribute if not specified
+    # Auto-detect model type
     if is_sdxl is None:
         is_sdxl = getattr(model, 'is_sdxl', False)
     
-    scaling_factor = VAE_SCALING_FACTOR_SDXL if is_sdxl else VAE_SCALING_FACTOR_SD15
+    scaling_factor = get_vae_scaling_factor(model)
     
     latents = 1 / scaling_factor * latents.detach()
     
@@ -147,11 +155,11 @@ def image2latent(model, image, is_sdxl=None):
     # Handle both pipeline and VAE being passed
     vae = model.vae if hasattr(model, 'vae') else model
     
-    # Auto-detect SDXL based on model attribute if not specified
+    # Auto-detect model type
     if is_sdxl is None:
         is_sdxl = getattr(model, 'is_sdxl', False)
     
-    scaling_factor = VAE_SCALING_FACTOR_SDXL if is_sdxl else VAE_SCALING_FACTOR_SD15
+    scaling_factor = get_vae_scaling_factor(model)
     
     # Get device from model parameters
     device = next(vae.parameters()).device

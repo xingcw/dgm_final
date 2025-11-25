@@ -4,26 +4,91 @@ from models.p2p.inversion import NegativePromptInversion, NullInversion, DirectI
 from models.p2p.attention_control import EmptyControl, AttentionStore, make_controller
 from models.p2p.p2p_guidance_forward import p2p_guidance_forward, direct_inversion_p2p_guidance_forward, direct_inversion_p2p_guidance_forward_add_target,p2p_guidance_forward_single_branch
 from models.p2p.proximal_guidance_forward import proximal_guidance_forward
-from diffusers import StableDiffusionPipeline
-from utils.utils import load_512, latent2image, txt_draw
+from diffusers import DiffusionPipeline
+from utils.utils import load_512, load_768, load_1024, latent2image, txt_draw
 from PIL import Image
 import numpy as np
+import torch
 
 class P2PEditor:
-    def __init__(self, method_list, device, num_ddim_steps=50) -> None:
-        self.device=device
-        self.method_list=method_list
-        self.num_ddim_steps=num_ddim_steps
+    def __init__(self, method_list, device, num_ddim_steps=50, model_type="sdxl", low_memory=False) -> None:
+        self.device = device
+        self.method_list = method_list
+        self.num_ddim_steps = num_ddim_steps
+        self.model_type = model_type
+        self.use_sdxl = (model_type == "sdxl")
+        # Set image size based on model type
+        if model_type == "sdxl":
+            self.image_size = 1024
+        elif model_type == "sd21":
+            self.image_size = 768
+        else:
+            self.image_size = 512
+        
         # init model
         self.scheduler = DDIMSchedulerDev(beta_start=0.00085,
                                     beta_end=0.012,
                                     beta_schedule="scaled_linear",
                                     clip_sample=False,
                                     set_alpha_to_one=False)
-        self.ldm_stable = StableDiffusionPipeline.from_pretrained(
-            "CompVis/stable-diffusion-v1-4", scheduler=self.scheduler).to(device)
+        
+        if model_type == "sdxl":
+            # Load SDXL pipeline
+            self.ldm_stable = DiffusionPipeline.from_pretrained(
+                "stabilityai/stable-diffusion-xl-base-1.0", 
+                torch_dtype=torch.float16, 
+                use_safetensors=True, 
+                variant="fp16",
+                scheduler=self.scheduler
+            ).to(device, dtype=torch.float16)
+            self.ldm_stable.is_sdxl = True
+        elif model_type == "sd21":
+            # Load SD 2.1 pipeline
+            from diffusers import StableDiffusionPipeline
+            self.ldm_stable = StableDiffusionPipeline.from_pretrained(
+                "stabilityai/stable-diffusion-2-1",
+                scheduler=self.scheduler,
+                torch_dtype=torch.float16,
+            )
+            self.ldm_stable.is_sdxl = False
+        else:
+            # Load SD 1.5 pipeline (original)
+            from diffusers import StableDiffusionPipeline
+            self.ldm_stable = StableDiffusionPipeline.from_pretrained(
+                "runwayml/stable-diffusion-v1-5",
+                scheduler=self.scheduler,
+                torch_dtype=torch.float16,
+            )
+            self.ldm_stable.is_sdxl = False
+        
+        # Memory optimizations
+        if low_memory:
+            self.ldm_stable.enable_sequential_cpu_offload()
+            print(f"Sequential CPU offload enabled for {model_type}")
+        else:
+            self.ldm_stable = self.ldm_stable.to(device)
+        
+        # Enable memory-efficient attention
+        self.ldm_stable.enable_attention_slicing(slice_size="auto")
+        if hasattr(self.ldm_stable, 'enable_vae_slicing'):
+            self.ldm_stable.enable_vae_slicing()
+        if hasattr(self.ldm_stable, 'enable_vae_tiling'):
+            self.ldm_stable.enable_vae_tiling()
+        
         self.ldm_stable.scheduler.set_timesteps(self.num_ddim_steps)
-
+        
+        # Clear cache after loading
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    
+    def load_image(self, image_path):
+        """Load image based on model type"""
+        if self.model_type == "sdxl":
+            return load_1024(image_path)
+        elif self.model_type == "sd21":
+            return load_768(image_path)
+        else:
+            return load_512(image_path)
         
     def __call__(self, 
                 edit_method,
@@ -146,7 +211,7 @@ class P2PEditor:
         eq_params=None,
         is_replace_controller=False,
     ):
-        image_gt = load_512(image_path)
+        image_gt = self.load_image(image_path)
         prompts = [prompt_src, prompt_tar]
 
         null_inversion = NullInversion(model=self.ldm_stable,
@@ -166,8 +231,9 @@ class P2PEditor:
                                        uncond_embeddings=uncond_embeddings)
         
 
-        reconstruct_image = latent2image(model=self.ldm_stable.vae, latents=reconstruct_latent)[0]
-        image_instruct = txt_draw(f"source prompt: {prompt_src}\ntarget prompt: {prompt_tar}")
+        reconstruct_image = latent2image(model=self.ldm_stable, latents=reconstruct_latent)[0]
+        image_instruct = txt_draw(f"source prompt: {prompt_src}\ntarget prompt: {prompt_tar}", 
+                                      target_size=[self.image_size, self.image_size])
         
         ########## edit ##########
         cross_replace_steps = {
@@ -182,7 +248,8 @@ class P2PEditor:
                                     blend_words=blend_word,
                                     equilizer_params=eq_params,
                                     num_ddim_steps=self.num_ddim_steps,
-                                    device=self.device)
+                                    device=self.device,
+                                    is_sdxl=self.use_sdxl)
         latents, _ = p2p_guidance_forward(model=self.ldm_stable, 
                                        prompt=prompts, 
                                        controller=controller, 
@@ -192,7 +259,7 @@ class P2PEditor:
                                        generator=None, 
                                        uncond_embeddings=uncond_embeddings)
 
-        images = latent2image(model=self.ldm_stable.vae, latents=latents)
+        images = latent2image(model=self.ldm_stable, latents=latents)
 
         return Image.fromarray(np.concatenate((image_instruct, image_gt, reconstruct_image,images[-1]),axis=1))
 
@@ -208,7 +275,7 @@ class P2PEditor:
         eq_params=None,
         is_replace_controller=False,
     ):
-        image_gt = load_512(image_path)
+        image_gt = self.load_image(image_path)
         prompts = [prompt_src, prompt_tar]
 
         null_inversion = NullInversion(model=self.ldm_stable,
@@ -228,8 +295,9 @@ class P2PEditor:
                                        uncond_embeddings=uncond_embeddings)
         
 
-        reconstruct_image = latent2image(model=self.ldm_stable.vae, latents=reconstruct_latent)[0]
-        image_instruct = txt_draw(f"source prompt: {prompt_src}\ntarget prompt: {prompt_tar}")
+        reconstruct_image = latent2image(model=self.ldm_stable, latents=reconstruct_latent)[0]
+        image_instruct = txt_draw(f"source prompt: {prompt_src}\ntarget prompt: {prompt_tar}", 
+                                      target_size=[self.image_size, self.image_size])
         
         ########## edit ##########
         cross_replace_steps = {
@@ -244,7 +312,8 @@ class P2PEditor:
                                     blend_words=blend_word,
                                     equilizer_params=eq_params,
                                     num_ddim_steps=self.num_ddim_steps,
-                                    device=self.device)
+                                    device=self.device,
+                                    is_sdxl=self.use_sdxl)
         latents, _ = p2p_guidance_forward(model=self.ldm_stable, 
                                        prompt=prompts, 
                                        controller=controller, 
@@ -254,7 +323,7 @@ class P2PEditor:
                                        generator=None, 
                                        uncond_embeddings=uncond_embeddings)
 
-        images = latent2image(model=self.ldm_stable.vae, latents=latents)
+        images = latent2image(model=self.ldm_stable, latents=latents)
 
         return Image.fromarray(np.concatenate((image_instruct, image_gt, reconstruct_image,images[-1]),axis=1))
 
@@ -270,7 +339,7 @@ class P2PEditor:
         eq_params=None,
         is_replace_controller=False,
     ):
-        image_gt = load_512(image_path)
+        image_gt = self.load_image(image_path)
         prompts = [prompt_src, prompt_tar]
 
         null_inversion = NullInversion(model=self.ldm_stable,
@@ -290,8 +359,9 @@ class P2PEditor:
                                        uncond_embeddings=uncond_embeddings)
         
 
-        reconstruct_image = latent2image(model=self.ldm_stable.vae, latents=reconstruct_latent)[0]
-        image_instruct = txt_draw(f"source prompt: {prompt_src}\ntarget prompt: {prompt_tar}")
+        reconstruct_image = latent2image(model=self.ldm_stable, latents=reconstruct_latent)[0]
+        image_instruct = txt_draw(f"source prompt: {prompt_src}\ntarget prompt: {prompt_tar}", 
+                                      target_size=[self.image_size, self.image_size])
         
         ########## edit ##########
         cross_replace_steps = {
@@ -306,7 +376,8 @@ class P2PEditor:
                                     blend_words=blend_word,
                                     equilizer_params=eq_params,
                                     num_ddim_steps=self.num_ddim_steps,
-                                    device=self.device)
+                                    device=self.device,
+                                    is_sdxl=self.use_sdxl)
         latents, _ = p2p_guidance_forward_single_branch(model=self.ldm_stable, 
                                        prompt=prompts, 
                                        controller=controller, 
@@ -316,7 +387,7 @@ class P2PEditor:
                                        generator=None, 
                                        uncond_embeddings=uncond_embeddings)
 
-        images = latent2image(model=self.ldm_stable.vae, latents=latents)
+        images = latent2image(model=self.ldm_stable, latents=latents)
 
         return Image.fromarray(np.concatenate((image_instruct, image_gt, reconstruct_image,images[-1]),axis=1))
 
@@ -341,7 +412,7 @@ class P2PEditor:
         use_inversion_guidance=False,
         dilate_mask=1,
     ):
-        image_gt = load_512(image_path)
+        image_gt = self.load_image(image_path)
         prompts = [prompt_src, prompt_tar]
 
         null_inversion = NegativePromptInversion(model=self.ldm_stable,
@@ -369,8 +440,9 @@ class P2PEditor:
                     x_stars=None,
                     dilate_mask=dilate_mask)
         
-        reconstruct_image = latent2image(model=self.ldm_stable.vae, latents=reconstruct_latent)[0]
-        image_instruct = txt_draw(f"source prompt: {prompt_src}\ntarget prompt: {prompt_tar}")
+        reconstruct_image = latent2image(model=self.ldm_stable, latents=reconstruct_latent)[0]
+        image_instruct = txt_draw(f"source prompt: {prompt_src}\ntarget prompt: {prompt_tar}", 
+                                      target_size=[self.image_size, self.image_size])
 
         ########## edit ##########
         cross_replace_steps = {
@@ -385,7 +457,8 @@ class P2PEditor:
                                     blend_words=blend_word,
                                     equilizer_params=eq_params,
                                     num_ddim_steps=self.num_ddim_steps,
-                                    device=self.device)
+                                    device=self.device,
+                                    is_sdxl=self.use_sdxl)
         
         
         latents, _ = proximal_guidance_forward(
@@ -407,7 +480,7 @@ class P2PEditor:
                         x_stars=x_stars,
                         dilate_mask=dilate_mask)
 
-        images = latent2image(model=self.ldm_stable.vae, latents=latents)
+        images = latent2image(model=self.ldm_stable, latents=latents)
 
 
         return Image.fromarray(np.concatenate((image_instruct, image_gt, reconstruct_image,images[-1]),axis=1))
@@ -424,7 +497,7 @@ class P2PEditor:
         eq_params=None,
         is_replace_controller=False,
     ):
-        image_gt = load_512(image_path)
+        image_gt = self.load_image(image_path)
         prompts = [prompt_src, prompt_tar]
 
         null_inversion = DirectInversion(model=self.ldm_stable,
@@ -445,7 +518,7 @@ class P2PEditor:
                                        generator=None)
     
         
-        reconstruct_image = latent2image(model=self.ldm_stable.vae, latents=reconstruct_latent)[0]
+        reconstruct_image = latent2image(model=self.ldm_stable, latents=reconstruct_latent)[0]
 
         ########## edit ##########
         cross_replace_steps = {
@@ -460,7 +533,8 @@ class P2PEditor:
                                     blend_words=blend_word,
                                     equilizer_params=eq_params,
                                     num_ddim_steps=self.num_ddim_steps,
-                                    device=self.device)
+                                    device=self.device,
+                                    is_sdxl=self.use_sdxl)
         
         latents, _ = direct_inversion_p2p_guidance_forward(model=self.ldm_stable, 
                                        prompt=prompts, 
@@ -471,10 +545,11 @@ class P2PEditor:
                                        guidance_scale=guidance_scale, 
                                        generator=None)
 
-        images = latent2image(model=self.ldm_stable.vae, latents=latents)
+        images = latent2image(model=self.ldm_stable, latents=latents)
 
         
-        image_instruct = txt_draw(f"source prompt: {prompt_src}\ntarget prompt: {prompt_tar}")
+        image_instruct = txt_draw(f"source prompt: {prompt_src}\ntarget prompt: {prompt_tar}", 
+                                      target_size=[self.image_size, self.image_size])
         
         return Image.fromarray(np.concatenate((image_instruct, image_gt, reconstruct_image,images[-1]),axis=1))
 
@@ -491,7 +566,7 @@ class P2PEditor:
         eq_params=None,
         is_replace_controller=False,
     ):
-        image_gt = load_512(image_path)
+        image_gt = self.load_image(image_path)
         prompts = [prompt_src, prompt_tar]
 
         null_inversion = DirectInversion(model=self.ldm_stable,
@@ -513,7 +588,7 @@ class P2PEditor:
                                        generator=None)
     
         
-        reconstruct_image = latent2image(model=self.ldm_stable.vae, latents=reconstruct_latent)[0]
+        reconstruct_image = latent2image(model=self.ldm_stable, latents=reconstruct_latent)[0]
 
         ########## edit ##########
         cross_replace_steps = {
@@ -528,7 +603,8 @@ class P2PEditor:
                                     blend_words=blend_word,
                                     equilizer_params=eq_params,
                                     num_ddim_steps=self.num_ddim_steps,
-                                    device=self.device)
+                                    device=self.device,
+                                    is_sdxl=self.use_sdxl)
         
         latents, _ = direct_inversion_p2p_guidance_forward(model=self.ldm_stable, 
                                        prompt=prompts, 
@@ -539,10 +615,11 @@ class P2PEditor:
                                        guidance_scale=forward_guidance_scale, 
                                        generator=None)
 
-        images = latent2image(model=self.ldm_stable.vae, latents=latents)
+        images = latent2image(model=self.ldm_stable, latents=latents)
 
         
-        image_instruct = txt_draw(f"source prompt: {prompt_src}\ntarget prompt: {prompt_tar}")
+        image_instruct = txt_draw(f"source prompt: {prompt_src}\ntarget prompt: {prompt_tar}", 
+                                      target_size=[self.image_size, self.image_size])
         
 
         return Image.fromarray(np.concatenate((image_instruct, image_gt, reconstruct_image,images[-1]),axis=1))
@@ -566,7 +643,7 @@ class P2PEditor:
         use_inversion_guidance=False,
         dilate_mask=1,
     ):
-        image_gt = load_512(image_path)
+        image_gt = self.load_image(image_path)
         prompts = [prompt_src, prompt_tar]
 
         null_inversion = NullInversion(model=self.ldm_stable,
@@ -594,8 +671,9 @@ class P2PEditor:
                     x_stars=None,
                     dilate_mask=dilate_mask)
         
-        reconstruct_image = latent2image(model=self.ldm_stable.vae, latents=reconstruct_latent)[0]
-        image_instruct = txt_draw(f"source prompt: {prompt_src}\ntarget prompt: {prompt_tar}")
+        reconstruct_image = latent2image(model=self.ldm_stable, latents=reconstruct_latent)[0]
+        image_instruct = txt_draw(f"source prompt: {prompt_src}\ntarget prompt: {prompt_tar}", 
+                                      target_size=[self.image_size, self.image_size])
 
         ########## edit ##########
         cross_replace_steps = {
@@ -610,7 +688,8 @@ class P2PEditor:
                                     blend_words=blend_word,
                                     equilizer_params=eq_params,
                                     num_ddim_steps=self.num_ddim_steps,
-                                    device=self.device)
+                                    device=self.device,
+                                    is_sdxl=self.use_sdxl)
         
         
         latents, _ = proximal_guidance_forward(
@@ -632,7 +711,7 @@ class P2PEditor:
                         x_stars=x_stars,
                         dilate_mask=dilate_mask)
 
-        images = latent2image(model=self.ldm_stable.vae, latents=latents)
+        images = latent2image(model=self.ldm_stable, latents=latents)
 
 
         return Image.fromarray(np.concatenate((image_instruct, image_gt, reconstruct_image,images[-1]),axis=1))
@@ -649,7 +728,7 @@ class P2PEditor:
         eq_params=None,
         is_replace_controller=False,
     ):
-        image_gt = load_512(image_path)
+        image_gt = self.load_image(image_path)
         prompts = [prompt_src, prompt_tar]
 
         null_inversion = DirectInversion(model=self.ldm_stable,
@@ -670,7 +749,7 @@ class P2PEditor:
                                        generator=None)
     
         
-        reconstruct_image = latent2image(model=self.ldm_stable.vae, latents=reconstruct_latent)[0]
+        reconstruct_image = latent2image(model=self.ldm_stable, latents=reconstruct_latent)[0]
 
         ########## edit ##########
         cross_replace_steps = {
@@ -685,7 +764,8 @@ class P2PEditor:
                                     blend_words=blend_word,
                                     equilizer_params=eq_params,
                                     num_ddim_steps=self.num_ddim_steps,
-                                    device=self.device)
+                                    device=self.device,
+                                    is_sdxl=self.use_sdxl)
         
         latents, _ = direct_inversion_p2p_guidance_forward(model=self.ldm_stable, 
                                        prompt=prompts, 
@@ -696,10 +776,11 @@ class P2PEditor:
                                        guidance_scale=guidance_scale, 
                                        generator=None)
 
-        images = latent2image(model=self.ldm_stable.vae, latents=latents)
+        images = latent2image(model=self.ldm_stable, latents=latents)
 
         
-        image_instruct = txt_draw(f"source prompt: {prompt_src}\ntarget prompt: {prompt_tar}")
+        image_instruct = txt_draw(f"source prompt: {prompt_src}\ntarget prompt: {prompt_tar}", 
+                                      target_size=[self.image_size, self.image_size])
         
 
         return Image.fromarray(np.concatenate((image_instruct, image_gt, reconstruct_image,images[-1]),axis=1))
@@ -717,7 +798,7 @@ class P2PEditor:
         is_replace_controller=False,
         scale=1.
     ):
-        image_gt = load_512(image_path)
+        image_gt = self.load_image(image_path)
         prompts = [prompt_src, prompt_tar]
 
         null_inversion = DirectInversion(model=self.ldm_stable,
@@ -738,7 +819,7 @@ class P2PEditor:
                                        generator=None)
     
         
-        reconstruct_image = latent2image(model=self.ldm_stable.vae, latents=reconstruct_latent)[0]
+        reconstruct_image = latent2image(model=self.ldm_stable, latents=reconstruct_latent)[0]
 
         ########## edit ##########
         cross_replace_steps = {
@@ -753,7 +834,8 @@ class P2PEditor:
                                     blend_words=blend_word,
                                     equilizer_params=eq_params,
                                     num_ddim_steps=self.num_ddim_steps,
-                                    device=self.device)
+                                    device=self.device,
+                                    is_sdxl=self.use_sdxl)
         
         latents, _ = direct_inversion_p2p_guidance_forward(model=self.ldm_stable, 
                                        prompt=prompts, 
@@ -764,10 +846,11 @@ class P2PEditor:
                                        guidance_scale=guidance_scale, 
                                        generator=None)
 
-        images = latent2image(model=self.ldm_stable.vae, latents=latents)
+        images = latent2image(model=self.ldm_stable, latents=latents)
 
         
-        image_instruct = txt_draw(f"source prompt: {prompt_src}\ntarget prompt: {prompt_tar}")
+        image_instruct = txt_draw(f"source prompt: {prompt_src}\ntarget prompt: {prompt_tar}", 
+                                      target_size=[self.image_size, self.image_size])
         
         return Image.fromarray(np.concatenate((image_instruct, image_gt, reconstruct_image,images[-1]),axis=1))
 
@@ -785,7 +868,7 @@ class P2PEditor:
         eq_params=None,
         is_replace_controller=False,
     ):
-        image_gt = load_512(image_path)
+        image_gt = self.load_image(image_path)
         prompts = [prompt_src, prompt_tar]
 
         null_inversion = DirectInversion(model=self.ldm_stable,
@@ -806,7 +889,7 @@ class P2PEditor:
                                        generator=None)
     
         
-        reconstruct_image = latent2image(model=self.ldm_stable.vae, latents=reconstruct_latent)[0]
+        reconstruct_image = latent2image(model=self.ldm_stable, latents=reconstruct_latent)[0]
 
         ########## edit ##########
         cross_replace_steps = {
@@ -821,7 +904,8 @@ class P2PEditor:
                                     blend_words=blend_word,
                                     equilizer_params=eq_params,
                                     num_ddim_steps=self.num_ddim_steps,
-                                    device=self.device)
+                                    device=self.device,
+                                    is_sdxl=self.use_sdxl)
         
         latents, _ = direct_inversion_p2p_guidance_forward(model=self.ldm_stable, 
                                        prompt=prompts, 
@@ -832,10 +916,11 @@ class P2PEditor:
                                        guidance_scale=guidance_scale, 
                                        generator=None)
 
-        images = latent2image(model=self.ldm_stable.vae, latents=latents)
+        images = latent2image(model=self.ldm_stable, latents=latents)
 
         
-        image_instruct = txt_draw(f"source prompt: {prompt_src}\ntarget prompt: {prompt_tar}")
+        image_instruct = txt_draw(f"source prompt: {prompt_src}\ntarget prompt: {prompt_tar}", 
+                                      target_size=[self.image_size, self.image_size])
         
         return Image.fromarray(np.concatenate((image_instruct, image_gt, reconstruct_image,images[-1]),axis=1))
 
@@ -851,7 +936,7 @@ class P2PEditor:
         eq_params=None,
         is_replace_controller=False,
     ):
-        image_gt = load_512(image_path)
+        image_gt = self.load_image(image_path)
         prompts = [prompt_src, prompt_tar]
 
         null_inversion = DirectInversion(model=self.ldm_stable,
@@ -872,7 +957,7 @@ class P2PEditor:
                                        generator=None)
     
         
-        reconstruct_image = latent2image(model=self.ldm_stable.vae, latents=reconstruct_latent)[0]
+        reconstruct_image = latent2image(model=self.ldm_stable, latents=reconstruct_latent)[0]
 
         ########## edit ##########
         cross_replace_steps = {
@@ -887,7 +972,8 @@ class P2PEditor:
                                     blend_words=blend_word,
                                     equilizer_params=eq_params,
                                     num_ddim_steps=self.num_ddim_steps,
-                                    device=self.device)
+                                    device=self.device,
+                                    is_sdxl=self.use_sdxl)
         
         latents, _ = direct_inversion_p2p_guidance_forward_add_target(model=self.ldm_stable, 
                                        prompt=prompts, 
@@ -898,10 +984,11 @@ class P2PEditor:
                                        guidance_scale=guidance_scale, 
                                        generator=None)
 
-        images = latent2image(model=self.ldm_stable.vae, latents=latents)
+        images = latent2image(model=self.ldm_stable, latents=latents)
 
         
-        image_instruct = txt_draw(f"source prompt: {prompt_src}\ntarget prompt: {prompt_tar}")
+        image_instruct = txt_draw(f"source prompt: {prompt_src}\ntarget prompt: {prompt_tar}", 
+                                      target_size=[self.image_size, self.image_size])
         
         return Image.fromarray(np.concatenate((image_instruct, image_gt, reconstruct_image,images[-1]),axis=1))
 
@@ -918,7 +1005,7 @@ class P2PEditor:
         eq_params=None,
         is_replace_controller=False,
     ):
-        image_gt = load_512(image_path)
+        image_gt = self.load_image(image_path)
         prompts = [prompt_src, prompt_tar]
 
         null_inversion = DirectInversion(model=self.ldm_stable,
@@ -944,7 +1031,7 @@ class P2PEditor:
                                        generator=None)
     
         
-        reconstruct_image = latent2image(model=self.ldm_stable.vae, latents=reconstruct_latent)[0]
+        reconstruct_image = latent2image(model=self.ldm_stable, latents=reconstruct_latent)[0]
 
         ########## edit ##########
         cross_replace_steps = {
@@ -959,7 +1046,8 @@ class P2PEditor:
                                     blend_words=blend_word,
                                     equilizer_params=eq_params,
                                     num_ddim_steps=self.num_ddim_steps,
-                                    device=self.device)
+                                    device=self.device,
+                                    is_sdxl=self.use_sdxl)
         
         latents, _ = direct_inversion_p2p_guidance_forward_add_target(model=self.ldm_stable, 
                                        prompt=prompts, 
@@ -970,9 +1058,10 @@ class P2PEditor:
                                        guidance_scale=guidance_scale, 
                                        generator=None)
 
-        images = latent2image(model=self.ldm_stable.vae, latents=latents)
+        images = latent2image(model=self.ldm_stable, latents=latents)
 
         
-        image_instruct = txt_draw(f"source prompt: {prompt_src}\ntarget prompt: {prompt_tar}")
+        image_instruct = txt_draw(f"source prompt: {prompt_src}\ntarget prompt: {prompt_tar}", 
+                                      target_size=[self.image_size, self.image_size])
         
         return Image.fromarray(np.concatenate((image_instruct, image_gt, reconstruct_image,images[-1]),axis=1))

@@ -6,10 +6,16 @@ from utils.utils import get_word_inds, get_time_words_attention_alpha
 from models.p2p import seq_aligner
 
 MAX_NUM_WORDS = 77
-LATENT_SIZE = (64, 64)
+LATENT_SIZE = (64, 64)  # Will be updated for SDXL (128, 128)
 LOW_RESOURCE = False 
 
 def register_attention_control(model, controller):
+    """
+    Register attention control for both SD 1.5 and SDXL models.
+    SDXL uses 'Attention' class while SD 1.5 uses 'CrossAttention'.
+    """
+    is_sdxl = getattr(model, 'is_sdxl', False)
+    
     def ca_forward(self, place_in_unet):
         to_out = self.to_out
         if type(to_out) is torch.nn.modules.container.ModuleList:
@@ -17,7 +23,12 @@ def register_attention_control(model, controller):
         else:
             to_out = self.to_out
 
-        def forward(x, context=None, mask=None, **kwargs):
+        def forward(hidden_states, encoder_hidden_states=None, attention_mask=None, **kwargs):
+            # SDXL compatibility: handle different argument names
+            # SDXL uses encoder_hidden_states, SD 1.5 uses context
+            context = encoder_hidden_states
+            x = hidden_states
+            
             if isinstance(context, dict):  # NOTE: compatible with ELITE (0.11.1)
                 context = context['CONTEXT_TENSOR']
             batch_size, sequence_length, dim = x.shape
@@ -27,14 +38,28 @@ def register_attention_control(model, controller):
             context = context if is_cross else x
             k = self.to_k(context)
             v = self.to_v(context)
-            q = self.reshape_heads_to_batch_dim(q)
-            k = self.reshape_heads_to_batch_dim(k)
-            v = self.reshape_heads_to_batch_dim(v)
+            
+            # Handle different reshape methods for SDXL vs SD 1.5
+            if hasattr(self, 'reshape_heads_to_batch_dim'):
+                q = self.reshape_heads_to_batch_dim(q)
+                k = self.reshape_heads_to_batch_dim(k)
+                v = self.reshape_heads_to_batch_dim(v)
+            else:
+                # SDXL style head reshaping
+                inner_dim = q.shape[-1]
+                head_dim = inner_dim // h
+                q = q.view(batch_size, -1, h, head_dim).transpose(1, 2)
+                k = k.view(batch_size, -1, h, head_dim).transpose(1, 2)
+                v = v.view(batch_size, -1, h, head_dim).transpose(1, 2)
+                q = q.reshape(batch_size * h, -1, head_dim)
+                k = k.reshape(batch_size * h, -1, head_dim)
+                v = v.reshape(batch_size * h, -1, head_dim)
 
-            sim = torch.einsum("b i d, b j d -> b i j", q, k) * self.scale
+            scale = self.scale if hasattr(self, 'scale') else head_dim ** -0.5
+            sim = torch.einsum("b i d, b j d -> b i j", q, k) * scale
 
-            if mask is not None:
-                mask = mask.reshape(batch_size, -1)
+            if attention_mask is not None:
+                mask = attention_mask.reshape(batch_size, -1)
                 max_neg_value = -torch.finfo(sim.dtype).max
                 mask = mask[:, None, :].repeat(h, 1, 1)
                 sim.masked_fill_(~mask, max_neg_value)
@@ -43,8 +68,82 @@ def register_attention_control(model, controller):
             attn = sim.softmax(dim=-1)
             attn = controller(attn, is_cross, place_in_unet)
             out = torch.einsum("b i j, b j d -> b i d", attn, v)
-            out = self.reshape_batch_dim_to_heads(out)
+            
+            if hasattr(self, 'reshape_batch_dim_to_heads'):
+                out = self.reshape_batch_dim_to_heads(out)
+            else:
+                # SDXL style reshaping back
+                out = out.reshape(batch_size, h, -1, head_dim)
+                out = out.transpose(1, 2).reshape(batch_size, -1, inner_dim)
+            
             return to_out(out)
+
+        return forward
+    
+    # Alternative forward for SDXL using attention processors
+    def ca_forward_sdxl(self, place_in_unet):
+        to_out = self.to_out
+        if type(to_out) is torch.nn.modules.container.ModuleList:
+            to_out = self.to_out[0]
+        else:
+            to_out = self.to_out
+
+        def forward(hidden_states, encoder_hidden_states=None, attention_mask=None, **kwargs):
+            residual = hidden_states
+            
+            # Handle potential input normalization
+            if hasattr(self, 'spatial_norm') and self.spatial_norm is not None:
+                hidden_states = self.spatial_norm(hidden_states, kwargs.get('temb'))
+            
+            if hasattr(self, 'group_norm') and self.group_norm is not None:
+                hidden_states = self.group_norm(hidden_states.transpose(1, 2)).transpose(1, 2)
+            
+            if hasattr(self, 'norm_cross') and self.norm_cross is not None and encoder_hidden_states is not None:
+                encoder_hidden_states = self.norm_cross(encoder_hidden_states)
+            
+            batch_size, sequence_length, _ = hidden_states.shape
+            
+            is_cross = encoder_hidden_states is not None
+            
+            query = self.to_q(hidden_states)
+            
+            if encoder_hidden_states is None:
+                encoder_hidden_states = hidden_states
+            
+            key = self.to_k(encoder_hidden_states)
+            value = self.to_v(encoder_hidden_states)
+            
+            inner_dim = key.shape[-1]
+            head_dim = inner_dim // self.heads
+            
+            query = query.view(batch_size, -1, self.heads, head_dim).transpose(1, 2)
+            key = key.view(batch_size, -1, self.heads, head_dim).transpose(1, 2)
+            value = value.view(batch_size, -1, self.heads, head_dim).transpose(1, 2)
+            
+            # Attention
+            scale = head_dim ** -0.5
+            attn_weights = torch.matmul(query, key.transpose(-1, -2)) * scale
+            
+            if attention_mask is not None:
+                attn_weights = attn_weights + attention_mask
+            
+            attn_weights = attn_weights.softmax(dim=-1)
+            
+            # Apply controller - reshape for controller compatibility
+            attn_weights_reshaped = attn_weights.reshape(batch_size * self.heads, -1, attn_weights.shape[-1])
+            attn_weights_reshaped = controller(attn_weights_reshaped, is_cross, place_in_unet)
+            attn_weights = attn_weights_reshaped.reshape(batch_size, self.heads, -1, attn_weights.shape[-1])
+            
+            hidden_states = torch.matmul(attn_weights, value)
+            hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, inner_dim)
+            
+            # Linear projection
+            hidden_states = to_out(hidden_states)
+            
+            if hasattr(self, 'residual_connection') and self.residual_connection:
+                hidden_states = hidden_states + residual
+            
+            return hidden_states
 
         return forward
 
@@ -60,8 +159,14 @@ def register_attention_control(model, controller):
         controller = DummyController()
 
     def register_recr(net_, count, place_in_unet):
-        if net_.__class__.__name__ == 'CrossAttention':
+        # Support both CrossAttention (SD 1.5) and Attention (SDXL)
+        class_name = net_.__class__.__name__
+        if class_name == 'CrossAttention':
             net_.forward = ca_forward(net_, place_in_unet)
+            return count + 1
+        elif class_name == 'Attention':
+            # SDXL uses Attention class
+            net_.forward = ca_forward_sdxl(net_, place_in_unet)
             return count + 1
         elif hasattr(net_, 'children'):
             for net__ in net_.children():
@@ -99,7 +204,7 @@ class LocalBlend:
         maps = (maps * alpha).sum(-1).mean(1)
         if use_pool:
             maps = nnf.max_pool2d(maps, (k * 2 + 1, k * 2 +1), (1, 1), padding=(k, k))
-        mask = nnf.interpolate(maps, size=LATENT_SIZE)
+        mask = nnf.interpolate(maps, size=self.latent_size)
         mask = mask / mask.max(2, keepdims=True)[0].max(3, keepdims=True)[0]
         mask = mask.gt(self.th[1-int(use_pool)])
         mask = mask[:1] + mask
@@ -108,9 +213,14 @@ class LocalBlend:
     def __call__(self, x_t, attention_store):
         self.counter += 1
         if self.counter > self.start_blend:
-
+            # Skip local blend for SDXL - attention map structure is incompatible
+            if self.is_sdxl:
+                return x_t
+            
             maps = attention_store["down_cross"][2:4] + attention_store["up_cross"][:3]
-            maps = [item.reshape(self.alpha_layers.shape[0], -1, 1, 16, 16, MAX_NUM_WORDS) for item in maps]
+            # Compute attention map spatial size dynamically
+            attn_size = self.attn_res
+            maps = [item.reshape(self.alpha_layers.shape[0], -1, 1, attn_size, attn_size, MAX_NUM_WORDS) for item in maps]
             maps = torch.cat(maps, dim=1)
             mask = self.get_mask(maps, self.alpha_layers, True)
             if self.substruct_layers is not None:
@@ -121,7 +231,7 @@ class LocalBlend:
         return x_t
 
     def __init__(self, prompts, words, substruct_words=None, start_blend=0.2, th=(.3, .3),
-                 tokenizer=None, device="cuda",num_ddim_steps=50):
+                 tokenizer=None, device="cuda", num_ddim_steps=50, is_sdxl=False):
         alpha_layers = torch.zeros(len(prompts),  1, 1, 1, 1, MAX_NUM_WORDS)
         for i, (prompt, words_) in enumerate(zip(prompts, words)):
             if type(words_) is str:
@@ -144,7 +254,15 @@ class LocalBlend:
         self.alpha_layers = alpha_layers.to(device)
         self.start_blend = int(start_blend * num_ddim_steps)
         self.counter = 0 
-        self.th=th
+        self.th = th
+        self.is_sdxl = is_sdxl
+        # Set latent size and attention resolution based on model type
+        if is_sdxl:
+            self.latent_size = (128, 128)  # 1024/8 = 128
+            self.attn_res = 32  # SDXL attention map resolution
+        else:
+            self.latent_size = (64, 64)  # 512/8 = 64
+            self.attn_res = 16  # SD 1.5 attention map resolution
         
         
 class EmptyControl:
@@ -371,11 +489,13 @@ def make_controller(pipeline,
                     blend_words=None, 
                     equilizer_params=None, 
                     num_ddim_steps=50,
-                    device="cuda") -> AttentionControlEdit:
+                    device="cuda",
+                    is_sdxl=False) -> AttentionControlEdit:
     if blend_words is None:
         lb = None
     else:
-        lb = LocalBlend(prompts, blend_words, tokenizer=pipeline.tokenizer, device=device,num_ddim_steps=num_ddim_steps)
+        lb = LocalBlend(prompts, blend_words, tokenizer=pipeline.tokenizer, device=device, 
+                        num_ddim_steps=num_ddim_steps, is_sdxl=is_sdxl)
     if is_replace_controller:
         controller = AttentionReplace(prompts, 
                                       num_ddim_steps, 

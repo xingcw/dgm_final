@@ -45,28 +45,120 @@ def load_512(image_path, left=0, right=0, top=0, bottom=0):
     image = np.array(Image.fromarray(image).resize((512, 512)))
     return image
 
+def load_1024(image_path, left=0, right=0, top=0, bottom=0):
+    """Load and preprocess image to 1024x1024 for SDXL"""
+    if type(image_path) is str:
+        image = np.array(Image.open(image_path))[:, :, :3]
+    else:
+        image = image_path
+    h, w, c = image.shape
+    left = min(left, w-1)
+    right = min(right, w - left - 1)
+    top = min(top, h - left - 1)
+    bottom = min(bottom, h - top - 1)
+    image = image[top:h-bottom, left:w-right]
+    h, w, c = image.shape
+    if h < w:
+        offset = (w - h) // 2
+        image = image[:, offset:offset + h]
+    elif w < h:
+        offset = (h - w) // 2
+        image = image[offset:offset + w]
+    image = np.array(Image.fromarray(image).resize((1024, 1024)))
+    return image
+
+def load_768(image_path, left=0, right=0, top=0, bottom=0):
+    """Load and preprocess image to 768x768 for SD 2.1"""
+    if type(image_path) is str:
+        image = np.array(Image.open(image_path))[:, :, :3]
+    else:
+        image = image_path
+    h, w, c = image.shape
+    left = min(left, w-1)
+    right = min(right, w - left - 1)
+    top = min(top, h - left - 1)
+    bottom = min(bottom, h - top - 1)
+    image = image[top:h-bottom, left:w-right]
+    h, w, c = image.shape
+    if h < w:
+        offset = (w - h) // 2
+        image = image[:, offset:offset + h]
+    elif w < h:
+        offset = (h - w) // 2
+        image = image[offset:offset + w]
+    image = np.array(Image.fromarray(image).resize((768, 768)))
+    return image
+
 def init_latent(latent, model, height, width, generator, batch_size):
+    # Use config to avoid deprecation warning
+    in_channels = model.unet.config.in_channels
+    # Get model dtype
+    model_dtype = next(model.unet.parameters()).dtype
+    
     if latent is None:
         latent = torch.randn(
-            (1, model.unet.in_channels, height // 8, width // 8),
+            (1, in_channels, height // 8, width // 8),
             generator=generator,
+            dtype=model_dtype,
         )
-    latents = latent.expand(batch_size,  model.unet.in_channels, height // 8, width // 8).to(model.device)
+    latents = latent.expand(batch_size, in_channels, height // 8, width // 8).to(device=model.device, dtype=model_dtype)
     return latent, latents
 
 
+# VAE scaling factors
+VAE_SCALING_FACTOR_SD15 = 0.18215
+VAE_SCALING_FACTOR_SDXL = 0.13025
+
 @torch.no_grad()
-def latent2image(model, latents, return_type='np'):
-    latents = 1 / 0.18215 * latents.detach()
-    image = model.decode(latents)['sample']
+def latent2image(model, latents, return_type='np', is_sdxl=None):
+    # Handle both pipeline and VAE being passed
+    vae = model.vae if hasattr(model, 'vae') else model
+    
+    # Auto-detect SDXL based on model attribute if not specified
+    if is_sdxl is None:
+        is_sdxl = getattr(model, 'is_sdxl', False)
+    
+    scaling_factor = VAE_SCALING_FACTOR_SDXL if is_sdxl else VAE_SCALING_FACTOR_SD15
+    
+    latents = 1 / scaling_factor * latents.detach()
+    
+    # SDXL VAE has numerical stability issues in float16, use float32 for decoding
+    if is_sdxl:
+        vae_dtype = next(vae.parameters()).dtype
+        vae.to(dtype=torch.float32)
+        latents = latents.to(dtype=torch.float32)
+        image = vae.decode(latents)['sample']
+        vae.to(dtype=vae_dtype)  # Convert back
+    else:
+        model_dtype = next(vae.parameters()).dtype
+        latents = latents.to(dtype=model_dtype)
+        image = vae.decode(latents)['sample']
+    
     if return_type == 'np':
         image = (image / 2 + 0.5).clamp(0, 1)
+        # Handle any NaN values
+        image = torch.nan_to_num(image, nan=0.0, posinf=1.0, neginf=0.0)
         image = image.cpu().permute(0, 2, 3, 1).numpy()
         image = (image * 255).astype(np.uint8)
     return image
 
 @torch.no_grad()
-def image2latent(model, image):
+def image2latent(model, image, is_sdxl=None):
+    # Handle both pipeline and VAE being passed
+    vae = model.vae if hasattr(model, 'vae') else model
+    
+    # Auto-detect SDXL based on model attribute if not specified
+    if is_sdxl is None:
+        is_sdxl = getattr(model, 'is_sdxl', False)
+    
+    scaling_factor = VAE_SCALING_FACTOR_SDXL if is_sdxl else VAE_SCALING_FACTOR_SD15
+    
+    # Get device from model parameters
+    device = next(vae.parameters()).device
+    
+    # SDXL VAE has numerical stability issues in float16, use float32 for encoding
+    encode_dtype = torch.float32 if is_sdxl else next(vae.parameters()).dtype
+    
     with torch.no_grad():
         if type(image) is Image:
             image = np.array(image)
@@ -74,9 +166,19 @@ def image2latent(model, image):
             latents = image
         else:
             image = torch.from_numpy(image).float() / 127.5 - 1
-            image = image.permute(2, 0, 1).unsqueeze(0).to(model.device)
-            latents = model.encode(image)['latent_dist'].mean
-            latents = latents * 0.18215
+            image = image.permute(2, 0, 1).unsqueeze(0).to(device=device, dtype=encode_dtype)
+            
+            # For SDXL, temporarily convert VAE to float32 for encoding
+            if is_sdxl:
+                vae_dtype = next(vae.parameters()).dtype
+                vae.to(dtype=torch.float32)
+                latents = vae.encode(image)['latent_dist'].mean
+                vae.to(dtype=vae_dtype)  # Convert back
+                latents = latents.to(dtype=vae_dtype)
+            else:
+                latents = vae.encode(image)['latent_dist'].mean
+            
+            latents = latents * scaling_factor
     return latents
 
 

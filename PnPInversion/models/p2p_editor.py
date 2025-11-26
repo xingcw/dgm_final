@@ -21,7 +21,7 @@ class P2PEditor:
                                     clip_sample=False,
                                     set_alpha_to_one=False)
         self.ldm_stable = StableDiffusionPipeline.from_pretrained(
-            "CompVis/stable-diffusion-v1-4", scheduler=self.scheduler).to(device)
+            "runwayml/stable-diffusion-v1-5", scheduler=self.scheduler).to(device)
         self.ldm_stable.scheduler.set_timesteps(self.num_ddim_steps)
 
         

@@ -1,0 +1,20 @@
+================================================================================
+STATISTICAL COMPARISON OF IMAGE EDITING METHODS
+================================================================================
+
+Method 1: sd21_directinversion+p2p (file1)
+Method 2: sd14_directinversion+p2p (file2)
+Total paired samples: 700
+
+Metric                                   | Method 1         | Method 2         | Diff     | p-value   | W1/W2/T     | Win%  | Winner       
+-----------------------------------------+------------------+------------------+----------+-----------+-------------+-------+--------------
+clip_similarity_source_image ↑           | 26.0388 ± 3.2972 | 26.0388 ± 3.2972 | +0.0000  | 0.0006*** | 324/232/144 | 46.3% | Method 1     
+clip_similarity_target_image ↑           | 24.9475 ± 3.5757 | 25.0393 ± 3.8437 | -0.0919  | 0.4156    | 333/367/0   | 47.6% | No sig. diff.
+clip_similarity_target_image_edit_part ↑ | 22.1251 ± 4.6388 | 22.1108 ± 4.7699 | +0.0143  | 0.9220    | 356/344/0   | 50.9% | No sig. diff.
+lpips_unedit_part ↓                      | 0.3198 ± 0.1324  | 0.0544 ± 0.0342  | +0.2654  | 0.0000*** | 0/556/0     | 0.0%  | Method 2     
+mse_unedit_part ↓                        | 0.0620 ± 0.0416  | 0.0033 ± 0.0034  | +0.0587  | 0.0000*** | 0/556/0     | 0.0%  | Method 2     
+psnr_unedit_part ↑                       | 13.2319 ± 3.6995 | 27.1968 ± 5.3365 | -13.9650 | 0.0000*** | 0/556/0     | 0.0%  | Method 2     
+ssim_unedit_part ↑                       | 0.5853 ± 0.1904  | 0.8502 ± 0.1139  | -0.2649  | 0.0000*** | 0/556/0     | 0.0%  | Method 2     
+structure_distance ↓                     | 0.1211 ± 0.0711  | 0.0116 ± 0.0101  | +0.1094  | 0.0000*** | 0/700/0     | 0.0%  | Method 2     
+
+Overall: Method1=1 wins, Method2=5 wins, No diff=2

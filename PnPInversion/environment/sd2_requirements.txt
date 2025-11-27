@@ -1,0 +1,20 @@
+# Core Stable Diffusion 2.0 requirements
+diffusers>=0.14.0, <0.17.0
+transformers
+huggingface_hub>=0.23.0,<0.26.0
+accelerate
+safetensors
+
+# Utilities
+ftfy
+numpy>=1.21, <2
+opencv-python>=4.5.0, <4.9.0
+matplotlib
+ipywidgets
+
+# Optional but commonly used with SD2 (ControlNet / preprocessors)
+controlnet_aux
+
+# Torch must be installed separately to match your CUDA setup
+# Example:
+# pip install torch==1.13.1+cu117 --extra-index-url https://download.pytorch.org/whl/cu117

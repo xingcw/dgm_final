@@ -162,11 +162,11 @@ def direct_inversion_p2p_guidance_forward(
         [""] * batch_size, padding="max_length", max_length=max_length, return_tensors="pt"
     )
     uncond_embeddings = model.text_encoder(uncond_input.input_ids.to(model.device))[0]
-
+    # import pdb; pdb.set_trace()
     latent, latents = init_latent(latent, model, height, width, generator, batch_size)
     model.scheduler.set_timesteps(num_inference_steps)
     for i, t in enumerate(model.scheduler.timesteps):
-        
+        # import pdb; pdb.set_trace()
         context = torch.cat([uncond_embeddings, text_embeddings])
         latents = direct_inversion_p2p_guidance_diffusion_step(model, controller, latents, context, t, guidance_scale, noise_loss_list[i],low_resource=False,add_offset=add_offset)
         

@@ -53,6 +53,7 @@ class NegativePromptInversion:
 
     @torch.no_grad()
     def ddim_loop(self, latent):
+        import pdb; pdb.set_trace()
         uncond_embeddings, cond_embeddings = self.context.chunk(2)
         all_latent = [latent]
         latent = latent.clone().detach()
@@ -270,6 +271,7 @@ class DirectInversion:
         return next_sample
     
     def get_noise_pred_single(self, latents, t, context):
+        # import pdb; pdb.set_trace()
         noise_pred = self.model.unet(latents, t, encoder_hidden_states=context)["sample"]
         return noise_pred
 
@@ -307,6 +309,7 @@ class DirectInversion:
 
     @torch.no_grad()
     def ddim_loop(self, latent):
+        # import pdb; pdb.set_trace()
         uncond_embeddings, cond_embeddings = self.context.chunk(2)
         cond_embeddings=cond_embeddings[[0]]
         all_latent = [latent]

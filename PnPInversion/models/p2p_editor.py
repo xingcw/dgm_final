@@ -8,6 +8,7 @@ from diffusers import StableDiffusionPipeline
 from utils.utils import load_512, latent2image, txt_draw
 from PIL import Image
 import numpy as np
+import os
 
 class P2PEditor:
     def __init__(self, method_list, device, num_ddim_steps=50) -> None:
@@ -21,8 +22,12 @@ class P2PEditor:
                                     clip_sample=False,
                                     set_alpha_to_one=False)
         self.ldm_stable = StableDiffusionPipeline.from_pretrained(
-            "CompVis/stable-diffusion-v1-4", scheduler=self.scheduler).to(device)
+            "sd2-community/stable-diffusion-2-base", scheduler=self.scheduler).to(device)
         self.ldm_stable.scheduler.set_timesteps(self.num_ddim_steps)
+
+        # self.ldm_stable_14 = StableDiffusionPipeline.from_pretrained(
+        #     "CompVis/stable-diffusion-v1-4", scheduler=self.scheduler).to(device)
+        # self.ldm_stable_14.scheduler.set_timesteps(self.num_ddim_steps)
 
         
     def __call__(self, 
@@ -168,6 +173,37 @@ class P2PEditor:
 
         reconstruct_image = latent2image(model=self.ldm_stable.vae, latents=reconstruct_latent)[0]
         image_instruct = txt_draw(f"source prompt: {prompt_src}\ntarget prompt: {prompt_tar}")
+        # save the reconstruct_image
+        save_dir = "results/reconstruct_image"
+        os.makedirs(save_dir, exist_ok=True)
+        reconstruct_image_png = Image.fromarray(reconstruct_image.astype(np.uint8))
+        reconstruct_image_png.save(os.path.join(save_dir, "reconstruct_image.png"))
+
+        null_inversion_14 = NullInversion(model=self.ldm_stable_14,
+                                    num_ddim_steps=self.num_ddim_steps)
+        _, _, x_stars_14, uncond_embeddings_14 = null_inversion_14.invert(
+            image_gt=image_gt, prompt=prompt_src,guidance_scale=guidance_scale,num_inner_steps=0)
+        x_t_14 = x_stars_14[-1]
+
+        controller_14 = AttentionStore()
+        reconstruct_latent_14, x_t_14 = p2p_guidance_forward(model=self.ldm_stable_14, 
+                                       prompt=[prompt_src], 
+                                       controller=controller_14, 
+                                       latent=x_t_14, 
+                                       num_inference_steps=self.num_ddim_steps, 
+                                       guidance_scale=guidance_scale, 
+                                       generator=None, 
+                                       uncond_embeddings=uncond_embeddings_14)
+        
+
+        reconstruct_image_14 = latent2image(model=self.ldm_stable_14.vae, latents=reconstruct_latent_14)[0]
+        image_instruct_14 = txt_draw(f"source prompt: {prompt_src}\ntarget prompt: {prompt_tar}")
+        # save the reconstruct_image
+        save_dir = "results/reconstruct_image"
+        reconstruct_image_14.save(os.path.join(save_dir, "reconstruct_image_14.png"))
+
+        
+
         
         ########## edit ##########
         cross_replace_steps = {
@@ -446,6 +482,37 @@ class P2PEditor:
     
         
         reconstruct_image = latent2image(model=self.ldm_stable.vae, latents=reconstruct_latent)[0]
+        save_dir = "results/reconstruct_image"
+        os.makedirs(save_dir, exist_ok=True)
+        # Ensure reconstruct_image is a numpy array and convert to PIL Image
+        if isinstance(reconstruct_image, np.ndarray):
+            reconstruct_image_png = Image.fromarray(reconstruct_image.astype(np.uint8))
+        else:
+            reconstruct_image_png = reconstruct_image  # Already a PIL Image
+        reconstruct_image_png.save(os.path.join(save_dir, "reconstruct_image_directinversion.png"))
+
+        # # do the same for the 14 branch
+        # null_inversion_14 = DirectInversion(model=self.ldm_stable_14,
+        #                             num_ddim_steps=self.num_ddim_steps)
+        # _, _, x_stars_14, noise_loss_list_14 = null_inversion_14.invert(
+        #     image_gt=image_gt, prompt=prompts,guidance_scale=guidance_scale)
+        # x_t_14 = x_stars_14[-1]
+        
+        # controller_14 = AttentionStore()
+        # reconstruct_latent_14, x_t_14 = direct_inversion_p2p_guidance_forward(model=self.ldm_stable_14, 
+        #                                prompt=prompts, 
+        #                                controller=controller_14, 
+        #                                noise_loss_list=noise_loss_list_14, 
+        #                                latent=x_t_14,
+        #                                num_inference_steps=self.num_ddim_steps, 
+        #                                guidance_scale=guidance_scale, 
+        #                                generator=None)
+        # reconstruct_image_14 = latent2image(model=self.ldm_stable_14.vae, latents=reconstruct_latent_14)[0]
+        # # save_dir = "results/reconstruct_image"
+        # # os.makedirs(save_dir, exist_ok=True)
+        # reconstruct_image_14_png = Image.fromarray(reconstruct_image_14.astype(np.uint8))
+        # reconstruct_image_14_png.save(os.path.join(save_dir, "reconstruct_image_directinversion_14.png"))
+
 
         ########## edit ##########
         cross_replace_steps = {

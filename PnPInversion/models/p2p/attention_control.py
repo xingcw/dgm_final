@@ -9,6 +9,50 @@ MAX_NUM_WORDS = 77
 LATENT_SIZE = (64, 64)
 LOW_RESOURCE = False 
 
+def batch_to_head_dim(tensor: torch.Tensor, heads: int) -> torch.Tensor:
+    """
+    Reshape the tensor from `[batch_size, seq_len, dim]` to `[batch_size // heads, seq_len, dim * heads]`. `heads`
+    is the number of heads initialized while constructing the `Attention` class.
+
+    Args:
+        tensor (`torch.Tensor`): The tensor to reshape.
+
+    Returns:
+        `torch.Tensor`: The reshaped tensor.
+    """
+    head_size = heads
+    batch_size, seq_len, dim = tensor.shape
+    tensor = tensor.reshape(batch_size // head_size, head_size, seq_len, dim)
+    tensor = tensor.permute(0, 2, 1, 3).reshape(batch_size // head_size, seq_len, dim * head_size)
+    return tensor
+
+def head_to_batch_dim(tensor: torch.Tensor, heads: int, out_dim: int = 3) -> torch.Tensor:
+    """
+    Reshape the tensor from `[batch_size, seq_len, dim]` to `[batch_size, seq_len, heads, dim // heads]` `heads` is
+    the number of heads initialized while constructing the `Attention` class.
+
+    Args:
+        tensor (`torch.Tensor`): The tensor to reshape.
+        out_dim (`int`, *optional*, defaults to `3`): The output dimension of the tensor. If `3`, the tensor is
+            reshaped to `[batch_size * heads, seq_len, dim // heads]`.
+
+    Returns:
+        `torch.Tensor`: The reshaped tensor.
+    """
+    head_size = heads
+    if tensor.ndim == 3:
+        batch_size, seq_len, dim = tensor.shape
+        extra_dim = 1
+    else:
+        batch_size, extra_dim, seq_len, dim = tensor.shape
+    tensor = tensor.reshape(batch_size, seq_len * extra_dim, head_size, dim // head_size)
+    tensor = tensor.permute(0, 2, 1, 3)
+
+    if out_dim == 3:
+        tensor = tensor.reshape(batch_size * head_size, seq_len * extra_dim, dim // head_size)
+
+    return tensor
+
 def register_attention_control(model, controller):
     def ca_forward(self, place_in_unet):
         to_out = self.to_out
@@ -25,11 +69,13 @@ def register_attention_control(model, controller):
             q = self.to_q(x)
             is_cross = context is not None
             context = context if is_cross else x
+            # import pdb; pdb.set_trace()
             k = self.to_k(context)
             v = self.to_v(context)
-            q = self.reshape_heads_to_batch_dim(q)
-            k = self.reshape_heads_to_batch_dim(k)
-            v = self.reshape_heads_to_batch_dim(v)
+            # print("q", q)
+            q = head_to_batch_dim(q, h)
+            k = head_to_batch_dim(k, h)
+            v = head_to_batch_dim(v, h)
 
             sim = torch.einsum("b i d, b j d -> b i j", q, k) * self.scale
 
@@ -43,7 +89,8 @@ def register_attention_control(model, controller):
             attn = sim.softmax(dim=-1)
             attn = controller(attn, is_cross, place_in_unet)
             out = torch.einsum("b i j, b j d -> b i d", attn, v)
-            out = self.reshape_batch_dim_to_heads(out)
+            out = batch_to_head_dim(out, heads=h)
+            # import pdb; pdb.set_trace()
             return to_out(out)
 
         return forward
@@ -60,7 +107,7 @@ def register_attention_control(model, controller):
         controller = DummyController()
 
     def register_recr(net_, count, place_in_unet):
-        if net_.__class__.__name__ == 'CrossAttention':
+        if net_.__class__.__name__ == 'Attention':
             net_.forward = ca_forward(net_, place_in_unet)
             return count + 1
         elif hasattr(net_, 'children'):
@@ -111,6 +158,7 @@ class LocalBlend:
 
             maps = attention_store["down_cross"][2:4] + attention_store["up_cross"][:3]
             maps = [item.reshape(self.alpha_layers.shape[0], -1, 1, 16, 16, MAX_NUM_WORDS) for item in maps]
+            print("maps:", maps)
             maps = torch.cat(maps, dim=1)
             mask = self.get_mask(maps, self.alpha_layers, True)
             if self.substruct_layers is not None:
@@ -220,6 +268,7 @@ class AttentionStore(AttentionControl):
 
     def forward(self, attn, is_cross, place_in_unet):
         key = f"{place_in_unet}_{'cross' if is_cross else 'self'}"
+        print("attn shape!!!:", attn.shape)
         if attn.shape[1] <= 32 ** 2:  # avoid memory overhead
             self.step_store[key].append(attn)
         return attn
@@ -252,7 +301,12 @@ class AttentionControlEdit(AttentionStore, abc.ABC):
     
     def step_callback(self, x_t):
         if self.local_blend is not None:
-            x_t = self.local_blend(x_t, self.attention_store)
+            # Use step_store if attention_store is empty (before first between_steps call)
+            # or if attention_store doesn't have the required keys
+            print("attention_store:", self.attention_store)
+            print("step_store:", self.step_store)
+            store_to_use = self.attention_store if len(self.attention_store) > 0 and "down_cross" in self.attention_store else self.step_store
+            x_t = self.local_blend(x_t, store_to_use)
         return x_t
         
     def replace_self_attention(self, attn_base, att_replace, place_in_unet):

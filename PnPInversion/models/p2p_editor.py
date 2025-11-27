@@ -2,18 +2,22 @@
 from models.p2p.scheduler_dev import DDIMSchedulerDev
 from models.p2p.inversion import NegativePromptInversion, NullInversion, DirectInversion
 from models.p2p.attention_control import EmptyControl, AttentionStore, make_controller
-from models.p2p.p2p_guidance_forward import p2p_guidance_forward, direct_inversion_p2p_guidance_forward, direct_inversion_p2p_guidance_forward_add_target,p2p_guidance_forward_single_branch
+from models.p2p.p2p_guidance_forward import p2p_guidance_forward, direct_inversion_p2p_guidance_forward, direct_inversion_p2p_guidance_forward_add_target,p2p_guidance_forward_single_branch, direct_inversion_p2p_guidance_forward_controlnet, p2p_guidance_forward_controlnet
 from models.p2p.proximal_guidance_forward import proximal_guidance_forward
-from diffusers import StableDiffusionPipeline
+from diffusers import StableDiffusionPipeline, StableDiffusionControlNetPipeline, ControlNetModel
+from controlnet_aux import OpenposeDetector
+from diffusers.utils import load_image
 from utils.utils import load_512, latent2image, txt_draw
 from PIL import Image
 import numpy as np
+import torch
 
 class P2PEditor:
-    def __init__(self, method_list, device, num_ddim_steps=50) -> None:
+    def __init__(self, method_list, device, num_ddim_steps=50, controlnet_model=None, use_controlnet=False) -> None:
         self.device=device
         self.method_list=method_list
         self.num_ddim_steps=num_ddim_steps
+        self.use_controlnet = use_controlnet
         # init model
         self.scheduler = DDIMSchedulerDev(beta_start=0.00085,
                                     beta_end=0.012,
@@ -23,6 +27,18 @@ class P2PEditor:
         self.ldm_stable = StableDiffusionPipeline.from_pretrained(
             "runwayml/stable-diffusion-v1-5", scheduler=self.scheduler).to(device)
         self.ldm_stable.scheduler.set_timesteps(self.num_ddim_steps)
+        
+        # Initialize ControlNet if needed
+        if use_controlnet:
+            if controlnet_model is None:
+                controlnet_model = "lllyasviel/control_v11p_sd15_openpose"
+            torch_dtype = torch.float32
+            self.controlnet = ControlNetModel.from_pretrained(controlnet_model, torch_dtype=torch_dtype).to(device)
+            self.ldm_stable.controlnet = self.controlnet
+            self.openpose_detector = OpenposeDetector.from_pretrained("lllyasviel/ControlNet")
+        else:
+            self.controlnet = None
+            self.openpose_detector = None
 
         
     def __call__(self, 
@@ -42,7 +58,10 @@ class P2PEditor:
                 eq_params=None,
                 is_replace_controller=False,
                 use_inversion_guidance=False,
-                dilate_mask=1,):
+                dilate_mask=1,
+                controlnet_conditioning_scale=1.0,
+                detect_resolution=512,
+                include_hand_and_face=True,):
         if edit_method=="ddim+p2p":
             return self.edit_image_ddim(image_path, prompt_src, prompt_tar, guidance_scale=guidance_scale, 
                                         cross_replace_steps=cross_replace_steps, self_replace_steps=self_replace_steps, 
@@ -66,6 +85,13 @@ class P2PEditor:
             return self.edit_image_directinversion(image_path=image_path, prompt_src=prompt_src, prompt_tar=prompt_tar, guidance_scale=guidance_scale, 
                                         cross_replace_steps=cross_replace_steps, self_replace_steps=self_replace_steps, 
                                         blend_word=blend_word, eq_params=eq_params, is_replace_controller=is_replace_controller)
+        elif edit_method=="directinversion+controlnet+p2p":
+            return self.edit_image_directinversion_controlnet(image_path=image_path, prompt_src=prompt_src, prompt_tar=prompt_tar, guidance_scale=guidance_scale, 
+                                        cross_replace_steps=cross_replace_steps, self_replace_steps=self_replace_steps, 
+                                        blend_word=blend_word, eq_params=eq_params, is_replace_controller=is_replace_controller,
+                                        controlnet_conditioning_scale=controlnet_conditioning_scale,
+                                        detect_resolution=detect_resolution,
+                                        include_hand_and_face=include_hand_and_face)
         elif edit_method in ["directinversion+p2p_guidance_0_1", "directinversion+p2p_guidance_0_5","directinversion+p2p_guidance_0_25", \
             "directinversion+p2p_guidance_0_75", "directinversion+p2p_guidance_1_1", "directinversion+p2p_guidance_1_5", "directinversion+p2p_guidance_1_25", \
                 "directinversion+p2p_guidance_1_75", "directinversion+p2p_guidance_25_1", "directinversion+p2p_guidance_25_5", "directinversion+p2p_guidance_25_25", \
@@ -976,3 +1002,131 @@ class P2PEditor:
         image_instruct = txt_draw(f"source prompt: {prompt_src}\ntarget prompt: {prompt_tar}")
         
         return Image.fromarray(np.concatenate((image_instruct, image_gt, reconstruct_image,images[-1]),axis=1))
+
+    def edit_image_directinversion_controlnet(
+        self,
+        image_path,
+        prompt_src,
+        prompt_tar,
+        guidance_scale=7.5,
+        cross_replace_steps=0.4,
+        self_replace_steps=0.6,
+        blend_word=None,
+        eq_params=None,
+        is_replace_controller=False,
+        controlnet_conditioning_scale=1.0,
+        detect_resolution=512,
+        include_hand_and_face=True,
+    ):
+        """Direct inversion with ControlNet and p2p editing."""
+        if not self.use_controlnet or self.controlnet is None:
+            raise ValueError("ControlNet is not initialized. Set use_controlnet=True when initializing P2PEditor.")
+        
+        image_gt = load_512(image_path)
+        prompts = [prompt_src, prompt_tar]
+
+        # Generate pose condition image
+        pose_image = self.openpose_detector(
+            Image.fromarray(image_gt),
+            detect_resolution=detect_resolution,
+            hand_and_face=include_hand_and_face,
+        )
+        
+        # Check if pose detection succeeded (OpenPose only works for humans, not animals/birds)
+        # If pose image is mostly black/empty, pose detection failed
+        pose_array_check = np.array(pose_image.convert('RGB'))
+        # Check if image is mostly black (mean pixel value < threshold)
+        # OpenPose returns black background with white/colored skeleton lines
+        # If mean is very low, likely no skeleton detected
+        pose_mean = pose_array_check.mean()
+        pose_detection_succeeded = pose_mean > 10  # Threshold: if mean < 10, likely all black
+        
+        if not pose_detection_succeeded:
+            import warnings
+            warnings.warn(
+                f"OpenPose detection failed (mean pixel value: {pose_mean:.2f}). "
+                "OpenPose only works for human poses, not animals/birds. "
+                "Falling back to regular p2p editing without ControlNet."
+            )
+            control_image = None  # Skip ControlNet, use regular p2p
+        else:
+            # Prepare control image for ControlNet
+            # Ensure pose image is RGB (3 channels) - OpenPose might return grayscale
+            if pose_image.mode != 'RGB':
+                pose_image = pose_image.convert('RGB')
+            
+            # Convert PIL to tensor and normalize to [-1, 1]
+            import torchvision.transforms as transforms
+            transform = transforms.Compose([
+                transforms.Resize((512, 512)),
+                transforms.ToTensor(),  # Converts to [C, H, W] in range [0, 1]
+            ])
+            control_image = transform(pose_image).unsqueeze(0).to(self.device)  # [1, C, H, W]
+            control_image = control_image * 2.0 - 1.0  # Normalize to [-1, 1]
+            
+            # Ensure control image matches ControlNet dtype
+            if self.controlnet is not None:
+                controlnet_dtype = next(self.controlnet.parameters()).dtype
+                control_image = control_image.to(dtype=controlnet_dtype)
+
+        null_inversion = DirectInversion(model=self.ldm_stable,
+                                    num_ddim_steps=self.num_ddim_steps)
+        _, _, x_stars, noise_loss_list = null_inversion.invert(
+            image_gt=image_gt, prompt=prompts,guidance_scale=guidance_scale)
+        x_t = x_stars[-1]
+
+        controller = AttentionStore()
+        
+        reconstruct_latent, x_t = direct_inversion_p2p_guidance_forward_controlnet(
+            model=self.ldm_stable, 
+            prompt=prompts, 
+            controller=controller, 
+            noise_loss_list=noise_loss_list, 
+            latent=x_t,
+            num_inference_steps=self.num_ddim_steps, 
+            guidance_scale=guidance_scale, 
+            generator=None,
+            controlnet_conditioning_image=control_image,
+            controlnet_conditioning_scale=controlnet_conditioning_scale,
+        )
+    
+        
+        reconstruct_image = latent2image(model=self.ldm_stable.vae, latents=reconstruct_latent)[0]
+
+        ########## edit ##########
+        cross_replace_steps = {
+            'default_': cross_replace_steps,
+        }
+
+        controller = make_controller(pipeline=self.ldm_stable,
+                                    prompts=prompts,
+                                    is_replace_controller=is_replace_controller,
+                                    cross_replace_steps=cross_replace_steps,
+                                    self_replace_steps=self_replace_steps,
+                                    blend_words=blend_word,
+                                    equilizer_params=eq_params,
+                                    num_ddim_steps=self.num_ddim_steps,
+                                    device=self.device)
+        
+        latents, _ = direct_inversion_p2p_guidance_forward_controlnet(
+            model=self.ldm_stable, 
+            prompt=prompts, 
+            controller=controller, 
+            noise_loss_list=noise_loss_list, 
+            latent=x_t,
+            num_inference_steps=self.num_ddim_steps, 
+            guidance_scale=guidance_scale, 
+            generator=None,
+            controlnet_conditioning_image=control_image,
+            controlnet_conditioning_scale=controlnet_conditioning_scale,
+        )
+
+        images = latent2image(model=self.ldm_stable.vae, latents=latents)
+
+        
+        image_instruct = txt_draw(f"source prompt: {prompt_src}\ntarget prompt: {prompt_tar}")
+        
+        # Convert pose_image to numpy array for concatenation
+        pose_array = np.array(pose_image.resize((512, 512))) if pose_image.size != (512, 512) else np.array(pose_image)
+        
+        return Image.fromarray(np.concatenate((image_instruct, image_gt, pose_array, reconstruct_image, images[-1]),axis=1))

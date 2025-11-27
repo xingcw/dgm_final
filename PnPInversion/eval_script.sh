@@ -5,9 +5,15 @@
 
 # cd PnPInversion || exit 1
 
-export MODEL_NAME=controlnet
+export MODEL_NAME=sd14
 
-python run_editing_controlnet.py \
+# python run_editing_controlnet.py \
+#     --data_path data \
+#     --output_path output/${MODEL_NAME} \
+#     --edit_category_list 5 \
+#     --conditioning_scale 0.3
+
+python run_editing_p2p.py \
     --data_path data \
     --output_path output/${MODEL_NAME} \
     --edit_category_list 5

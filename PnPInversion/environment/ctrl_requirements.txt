@@ -1,0 +1,10 @@
+diffusers>=0.14.0, <0.17.0
+huggingface_hub<0.17.0
+transformers
+ftfy
+opencv-python>=4.5.0, <4.9.0
+ipywidgets
+matplotlib
+accelerate<0.32.0
+controlnet_aux
+numpy>=1.21, <2

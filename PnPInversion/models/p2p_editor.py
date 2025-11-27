@@ -4,7 +4,7 @@ from models.p2p.inversion import NegativePromptInversion, NullInversion, DirectI
 from models.p2p.attention_control import EmptyControl, AttentionStore, make_controller
 from models.p2p.p2p_guidance_forward import p2p_guidance_forward, direct_inversion_p2p_guidance_forward, direct_inversion_p2p_guidance_forward_add_target,p2p_guidance_forward_single_branch, direct_inversion_p2p_guidance_forward_controlnet, p2p_guidance_forward_controlnet
 from models.p2p.proximal_guidance_forward import proximal_guidance_forward
-from diffusers import StableDiffusionPipeline, StableDiffusionControlNetPipeline, ControlNetModel
+from diffusers import StableDiffusionPipeline, ControlNetModel
 from controlnet_aux import OpenposeDetector
 from diffusers.utils import load_image
 from utils.utils import load_512, latent2image, txt_draw

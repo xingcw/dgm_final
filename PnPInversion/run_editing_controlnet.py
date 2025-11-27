@@ -76,7 +76,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--conditioning_scale",
         type=float,
-        default=1.0,
+        default=0.1,
         help="ControlNet conditioning strength (higher keeps pose closer to the original).",
     )
     parser.add_argument(
@@ -116,7 +116,7 @@ def main() -> None:
         device=device,
         num_ddim_steps=args.steps,
         controlnet_model=args.controlnet_model,
-        use_controlnet=True,
+        use_controlnet=True
     )
     
     # Load mapping file

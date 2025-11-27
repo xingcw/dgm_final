@@ -11,6 +11,7 @@ from utils.utils import load_512, latent2image, txt_draw
 from PIL import Image
 import numpy as np
 import torch
+import cv2
 
 class P2PEditor:
     def __init__(self, method_list, device, num_ddim_steps=50, controlnet_model=None, use_controlnet=False) -> None:
@@ -1025,49 +1026,39 @@ class P2PEditor:
         image_gt = load_512(image_path)
         prompts = [prompt_src, prompt_tar]
 
-        # Generate pose condition image
-        pose_image = self.openpose_detector(
-            Image.fromarray(image_gt),
-            detect_resolution=detect_resolution,
-            hand_and_face=include_hand_and_face,
-        )
+        # Generate Canny edge condition image
+        canny_pil = None
+        control_image = None
         
-        # Check if pose detection succeeded (OpenPose only works for humans, not animals/birds)
-        # If pose image is mostly black/empty, pose detection failed
-        pose_array_check = np.array(pose_image.convert('RGB'))
-        # Check if image is mostly black (mean pixel value < threshold)
-        # OpenPose returns black background with white/colored skeleton lines
-        # If mean is very low, likely no skeleton detected
-        pose_mean = pose_array_check.mean()
-        pose_detection_succeeded = pose_mean > 10  # Threshold: if mean < 10, likely all black
+        # Convert image to grayscale for Canny edge detection
+        image_gray = cv2.cvtColor(image_gt, cv2.COLOR_RGB2GRAY)
         
-        if not pose_detection_succeeded:
-            import warnings
-            warnings.warn(
-                f"OpenPose detection failed (mean pixel value: {pose_mean:.2f}). "
-                "OpenPose only works for human poses, not animals/birds. "
-                "Falling back to regular p2p editing without ControlNet."
-            )
-            control_image = None  # Skip ControlNet, use regular p2p
-        else:
-            # Prepare control image for ControlNet
-            # Ensure pose image is RGB (3 channels) - OpenPose might return grayscale
-            if pose_image.mode != 'RGB':
-                pose_image = pose_image.convert('RGB')
-            
-            # Convert PIL to tensor and normalize to [-1, 1]
-            import torchvision.transforms as transforms
-            transform = transforms.Compose([
-                transforms.Resize((512, 512)),
-                transforms.ToTensor(),  # Converts to [C, H, W] in range [0, 1]
-            ])
-            control_image = transform(pose_image).unsqueeze(0).to(self.device)  # [1, C, H, W]
-            control_image = control_image * 2.0 - 1.0  # Normalize to [-1, 1]
-            
-            # Ensure control image matches ControlNet dtype
-            if self.controlnet is not None:
-                controlnet_dtype = next(self.controlnet.parameters()).dtype
-                control_image = control_image.to(dtype=controlnet_dtype)
+        # Apply Canny edge detection
+        # Typical thresholds: low_threshold=100, high_threshold=200
+        canny_image = cv2.Canny(image_gray, 100, 200)
+        
+        # Convert to RGB (3 channels) for ControlNet
+        canny_image_rgb = cv2.cvtColor(canny_image, cv2.COLOR_GRAY2RGB)
+        
+        # Resize to 512x512 if needed
+        if canny_image_rgb.shape[:2] != (512, 512):
+            canny_image_rgb = cv2.resize(canny_image_rgb, (512, 512), interpolation=cv2.INTER_LINEAR)
+        
+        # Convert to PIL Image
+        canny_pil = Image.fromarray(canny_image_rgb)
+        
+        # Convert PIL to tensor and normalize to [-1, 1]
+        import torchvision.transforms as transforms
+        transform = transforms.Compose([
+            transforms.ToTensor(),  # Converts to [C, H, W] in range [0, 1]
+        ])
+        control_image = transform(canny_pil).unsqueeze(0).to(self.device)  # [1, C, H, W]
+        control_image = control_image * 2.0 - 1.0  # Normalize to [-1, 1]
+        
+        # Ensure control image matches ControlNet dtype
+        if self.controlnet is not None:
+            controlnet_dtype = next(self.controlnet.parameters()).dtype
+            control_image = control_image.to(dtype=controlnet_dtype)
 
         null_inversion = DirectInversion(model=self.ldm_stable,
                                     num_ddim_steps=self.num_ddim_steps)
@@ -1126,7 +1117,7 @@ class P2PEditor:
         
         image_instruct = txt_draw(f"source prompt: {prompt_src}\ntarget prompt: {prompt_tar}")
         
-        # Convert pose_image to numpy array for concatenation
-        pose_array = np.array(pose_image.resize((512, 512))) if pose_image.size != (512, 512) else np.array(pose_image)
+        # Convert Canny image to numpy array for concatenation
+        canny_array = np.array(canny_pil.resize((512, 512))) if canny_pil.size != (512, 512) else np.array(canny_pil)
         
-        return Image.fromarray(np.concatenate((image_instruct, image_gt, pose_array, reconstruct_image, images[-1]),axis=1))
+        return Image.fromarray(np.concatenate((image_instruct, image_gt, canny_array, reconstruct_image, images[-1]),axis=1))

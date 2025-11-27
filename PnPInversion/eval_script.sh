@@ -3,20 +3,21 @@
 # export CUDA_DEVICE_ORDER=PCI_BUS_ID
 # export CUDA_VISIBLE_DEVICES=0
 
-# cd PnPInversion || exit 1
+cd PnPInversion || exit 1
 
-export MODEL_NAME=sd14
+# export MODEL_NAME=sd14
+export MODEL_NAME=sd15
 
-# python run_editing_controlnet.py \
-#     --data_path data \
-#     --output_path output/${MODEL_NAME} \
-#     --edit_category_list 5 \
-#     --conditioning_scale 0.3
-
-python run_editing_p2p.py \
+python run_editing_controlnet.py \
     --data_path data \
     --output_path output/${MODEL_NAME} \
-    --edit_category_list 5
+    --edit_category_list 5 \
+    --conditioning_scale 0.1
+
+# python run_editing_p2p.py \
+#     --data_path data \
+#     --output_path output/${MODEL_NAME} \
+#     --edit_category_list 5
 
 # python evaluation/evaluate.py --metrics "structure_distance" \
 #     "psnr_unedit_part" "lpips_unedit_part" "mse_unedit_part" \

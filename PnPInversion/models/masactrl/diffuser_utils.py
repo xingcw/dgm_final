@@ -64,7 +64,7 @@ class MasaCtrlPipeline(StableDiffusionPipeline):
             image = torch.from_numpy(image).float() / 127.5 - 1
             image = image.permute(2, 0, 1).unsqueeze(0).to(DEVICE)
         # input image density range [-1, 1]
-        latents = self.vae.encode(image)['latent_dist'].mean
+        latents = self.vae.encode(image.to(dtype))['latent_dist'].mean
         latents = latents * 0.18215
         return latents
 

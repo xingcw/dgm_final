@@ -45,28 +45,6 @@ def load_512(image_path, left=0, right=0, top=0, bottom=0):
     image = np.array(Image.fromarray(image).resize((512, 512)))
     return image
 
-def load_1024(image_path, left=0, right=0, top=0, bottom=0):
-    """Load and preprocess image to 1024x1024 for SDXL"""
-    if type(image_path) is str:
-        image = np.array(Image.open(image_path))[:, :, :3]
-    else:
-        image = image_path
-    h, w, c = image.shape
-    left = min(left, w-1)
-    right = min(right, w - left - 1)
-    top = min(top, h - left - 1)
-    bottom = min(bottom, h - top - 1)
-    image = image[top:h-bottom, left:w-right]
-    h, w, c = image.shape
-    if h < w:
-        offset = (w - h) // 2
-        image = image[:, offset:offset + h]
-    elif w < h:
-        offset = (h - w) // 2
-        image = image[offset:offset + w]
-    image = np.array(Image.fromarray(image).resize((1024, 1024)))
-    return image
-
 def load_768(image_path, left=0, right=0, top=0, bottom=0):
     """Load and preprocess image to 768x768 for SD 2.1"""
     if type(image_path) is str:
@@ -90,103 +68,60 @@ def load_768(image_path, left=0, right=0, top=0, bottom=0):
     return image
 
 def init_latent(latent, model, height, width, generator, batch_size):
-    # Use config to avoid deprecation warning
-    in_channels = model.unet.config.in_channels
     # Get model dtype
-    model_dtype = next(model.unet.parameters()).dtype
+    if hasattr(model, 'dtype'):
+        model_dtype = model.dtype
+    elif hasattr(model, 'unet'):
+        model_dtype = next(model.unet.parameters()).dtype
+    else:
+        model_dtype = torch.float32
     
     if latent is None:
         latent = torch.randn(
-            (1, in_channels, height // 8, width // 8),
+            (1, model.unet.in_channels, height // 8, width // 8),
             generator=generator,
             dtype=model_dtype,
         )
-    latents = latent.expand(batch_size, in_channels, height // 8, width // 8).to(device=model.device, dtype=model_dtype)
+    latents = latent.expand(batch_size,  model.unet.config.in_channels, height // 8, width // 8).to(model.device).to(dtype=model_dtype)
     return latent, latents
 
 
-# VAE scaling factors
-VAE_SCALING_FACTOR_SD15 = 0.18215
-VAE_SCALING_FACTOR_SDXL = 0.13025
-
-def get_vae_scaling_factor(model):
-    """Get the appropriate VAE scaling factor based on model type."""
-    is_sdxl = getattr(model, 'is_sdxl', False)
-    if is_sdxl:
-        return VAE_SCALING_FACTOR_SDXL
-    else:
-        return VAE_SCALING_FACTOR_SD15
-
 @torch.no_grad()
-def latent2image(model, latents, return_type='np', is_sdxl=None):
-    # Handle both pipeline and VAE being passed
-    vae = model.vae if hasattr(model, 'vae') else model
-    
-    # Auto-detect model type
-    if is_sdxl is None:
-        is_sdxl = getattr(model, 'is_sdxl', False)
-    
-    scaling_factor = get_vae_scaling_factor(model)
-    
-    latents = 1 / scaling_factor * latents.detach()
-    
-    # SDXL VAE has numerical stability issues in float16, use float32 for decoding
-    if is_sdxl:
-        vae_dtype = next(vae.parameters()).dtype
-        vae.to(dtype=torch.float32)
-        latents = latents.to(dtype=torch.float32)
-        image = vae.decode(latents)['sample']
-        vae.to(dtype=vae_dtype)  # Convert back
+def latent2image(model, latents, return_type='np'):
+    # Get model dtype (VAE model dtype)
+    if hasattr(model, 'dtype'):
+        model_dtype = model.dtype
     else:
-        model_dtype = next(vae.parameters()).dtype
-        latents = latents.to(dtype=model_dtype)
-        image = vae.decode(latents)['sample']
+        model_dtype = next(model.parameters()).dtype
     
+    # Ensure latents match model dtype
+    latents = latents.detach().to(dtype=model_dtype)
+    latents = 1 / 0.18215 * latents
+    image = model.decode(latents)['sample']
     if return_type == 'np':
         image = (image / 2 + 0.5).clamp(0, 1)
-        # Handle any NaN values
-        image = torch.nan_to_num(image, nan=0.0, posinf=1.0, neginf=0.0)
         image = image.cpu().permute(0, 2, 3, 1).numpy()
         image = (image * 255).astype(np.uint8)
     return image
 
 @torch.no_grad()
-def image2latent(model, image, is_sdxl=None):
-    # Handle both pipeline and VAE being passed
-    vae = model.vae if hasattr(model, 'vae') else model
-    
-    # Auto-detect model type
-    if is_sdxl is None:
-        is_sdxl = getattr(model, 'is_sdxl', False)
-    
-    scaling_factor = get_vae_scaling_factor(model)
-    
-    # Get device from model parameters
-    device = next(vae.parameters()).device
-    
-    # SDXL VAE has numerical stability issues in float16, use float32 for encoding
-    encode_dtype = torch.float32 if is_sdxl else next(vae.parameters()).dtype
+def image2latent(model, image):
+    # Get model dtype (VAE model dtype)
+    if hasattr(model, 'dtype'):
+        model_dtype = model.dtype
+    else:
+        model_dtype = next(model.parameters()).dtype
     
     with torch.no_grad():
         if type(image) is Image:
             image = np.array(image)
         if type(image) is torch.Tensor and image.dim() == 4:
-            latents = image
+            latents = image.to(dtype=model_dtype)
         else:
             image = torch.from_numpy(image).float() / 127.5 - 1
-            image = image.permute(2, 0, 1).unsqueeze(0).to(device=device, dtype=encode_dtype)
-            
-            # For SDXL, temporarily convert VAE to float32 for encoding
-            if is_sdxl:
-                vae_dtype = next(vae.parameters()).dtype
-                vae.to(dtype=torch.float32)
-                latents = vae.encode(image)['latent_dist'].mean
-                vae.to(dtype=vae_dtype)  # Convert back
-                latents = latents.to(dtype=vae_dtype)
-            else:
-                latents = vae.encode(image)['latent_dist'].mean
-            
-            latents = latents * scaling_factor
+            image = image.permute(2, 0, 1).unsqueeze(0).to(model.device).to(dtype=model_dtype)
+            latents = model.encode(image)['latent_dist'].mean
+            latents = latents * 0.18215
     return latents
 
 
@@ -244,8 +179,7 @@ def get_time_words_attention_alpha(prompts, num_steps,
     alpha_time_words = alpha_time_words.reshape(num_steps + 1, len(prompts) - 1, 1, 1, max_num_words)
     return alpha_time_words
 
-def txt_draw(text,
-                target_size=[512,512]):
+def txt_draw(text, target_size=[512,512]):
     plt.figure(dpi=300,figsize=(1,1))
     plt.text(-0.1, 1.1, text,fontsize=3.5, wrap=True,verticalalignment="top",horizontalalignment="left")
     plt.axis('off')
@@ -263,3 +197,14 @@ def txt_draw(text,
     plt.close('all')
     
     return image
+
+
+def resize_and_concat_images(image_instruct, image_gt, reconstruct_image, edited_image):
+    resized_images = []
+
+    for image in [image_instruct, image_gt, reconstruct_image, edited_image]:
+        if isinstance(image, np.ndarray):
+            image = Image.fromarray(image)
+        resized_images.append(image.resize((512, 512)))
+
+    return Image.fromarray(np.concatenate(resized_images, axis=1))

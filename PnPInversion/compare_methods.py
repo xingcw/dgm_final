@@ -203,6 +203,18 @@ def compare_methods(csv1, csv2=None, method1=None, method2=None, output=None):
         label2 = name2
     else:
         raise ValueError("Must provide either csv2 or method2 for comparison")
+
+    # use the smaller dataframe as the base dataframe
+    # compare only the first n rows of the larger dataframe
+    if len(df1) < len(df2):
+        df1 = df1.head(len(df1))
+        df2 = df2.head(len(df1))
+    else:
+        df1 = df1.head(len(df2))
+        df2 = df2.head(len(df2))
+
+    print(f"Using {len(df1)} rows for comparison")
+    print(f"Using {len(df2)} rows for comparison")
     
     # Merge on file_id to ensure paired comparison
     merged = pd.merge(df1, df2, on='file_id', suffixes=('_1', '_2'))

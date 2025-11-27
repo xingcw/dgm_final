@@ -188,6 +188,7 @@ if __name__=="__main__":
                                                          "clip_similarity_target_image_edit_part",
                                                          ])
     parser.add_argument('--src_image_folder', type=str, default="data/annotation_images")
+    parser.add_argument('--tgt_image_folders', nargs = '+', type=str, default=None)
     parser.add_argument('--tgt_methods', nargs = '+', type=str, default=[
                                                                     "1_ddim+p2p", "1_null-text-inversion+p2p_a800",
                                                                     "1_null-text-inversion+p2p_3090", "1_negative-prompt-inversion+p2p",
@@ -215,6 +216,7 @@ if __name__=="__main__":
     metrics=args.metrics
     src_image_folder=args.src_image_folder
     tgt_methods=args.tgt_methods
+    custom_tgt_image_folders=args.tgt_image_folders
     edit_category_list=args.edit_category_list
     evaluate_whole_table=args.evaluate_whole_table
     
@@ -225,8 +227,10 @@ if __name__=="__main__":
             if key[0] in tgt_methods:
                 tgt_image_folders[key]=all_tgt_image_folders[key]
     else:
-        for key in tgt_methods:
+        for i, key in enumerate(tgt_methods):
             tgt_image_folders[key]=all_tgt_image_folders[key]
+            if custom_tgt_image_folders is not None:
+                tgt_image_folders[key]=custom_tgt_image_folders[i]
     
     result_path=args.result_path
     

@@ -86,13 +86,10 @@ if __name__ == "__main__":
     parser.add_argument('--output_path', type=str, default="output") # the editing category that needed to run
     parser.add_argument('--edit_category_list', nargs = '+', type=str, default=["0","1","2","3","4","5","6","7","8","9"]) # the editing category that needed to run
     parser.add_argument('--edit_method_list', nargs = '+', type=str, default=["ddim+p2p"]) # the editing methods that needed to run
-    parser.add_argument('--model_type', type=str, default="sdxl", choices=["sdxl", "sd21", "sd15", "sd14"],
-                        help="Model type: sdxl (~16-24GB), sd21 (~8-10GB), sd15 (~6-8GB), sd14 (~6-8GB)")
+    parser.add_argument('--model_type', type=str, default="sd14", choices=["sd21", "sd15", "sd14"],
+                        help="Model type: sd21 (~8-10GB), sd15 (~6-8GB), sd14 (~6-8GB)")
     parser.add_argument('--low_memory', action="store_true", 
                         help="Enable memory optimizations (CPU offload, attention slicing)")
-    parser.add_argument('--text_encoder', type=str, default="default", 
-                        choices=["default", "openclip-bigg", "openclip-h", "gpt2-large", "gpt2-small"],
-                        help="Text encoder for SDXL: default, openclip-bigg, openclip-h, gpt2-large (LLM, 1280-dim exact match!)")
     args = parser.parse_args()
     
     rerun_exist_images=args.rerun_exist_images
@@ -102,8 +99,7 @@ if __name__ == "__main__":
     edit_method_list=args.edit_method_list
     
     p2p_editor=P2PEditor(edit_method_list, torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu'),
-                         num_ddim_steps=50, model_type=args.model_type, low_memory=args.low_memory,
-                         text_encoder_type=args.text_encoder)
+                         num_ddim_steps=50, model_type=args.model_type, low_memory=args.low_memory)
     
     with open(f"{data_path}/mapping_file.json", "r") as f:
         editing_instruction = json.load(f)

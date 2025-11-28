@@ -287,7 +287,13 @@ def update_alpha_time_word(alpha, bounds: Union[float, Tuple[float, float]], pro
 
 def get_time_words_attention_alpha(prompts, num_steps,
                                    cross_replace_steps: Union[float, Dict[str, Tuple[float, float]]],
-                                   tokenizer, max_num_words=77):
+                                   tokenizer, max_num_words=None):
+    # Use tokenizer's model_max_length if max_num_words is not provided
+    if max_num_words is None:
+        if tokenizer is not None:
+            max_num_words = tokenizer.model_max_length
+        else:
+            max_num_words = 77  # Default fallback for backward compatibility
     if type(cross_replace_steps) is not dict:
         cross_replace_steps = {"default_": cross_replace_steps}
     if "default_" not in cross_replace_steps:

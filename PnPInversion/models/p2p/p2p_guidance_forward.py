@@ -14,6 +14,16 @@ def get_model_dtype(model):
         return torch.float32
 
 
+def get_model_device(model):
+    """Get the device of the model (typically from unet)."""
+    if hasattr(model, 'device'):
+        return model.device
+    elif hasattr(model, 'unet'):
+        return next(model.unet.parameters()).device
+    else:
+        return torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+
 def get_model_image_size(model):
     """Get the appropriate image size based on model type."""
     # Check for SD 2.1 by looking at model config or VAE sample size
@@ -78,13 +88,14 @@ def p2p_guidance_forward(
         return_tensors="pt",
     )
     model_dtype = get_model_dtype(model)
-    text_embeddings = model.text_encoder(text_input.input_ids.to(model.device))[0].to(dtype=model_dtype)
+    device = get_model_device(model)
+    text_embeddings = model.text_encoder(text_input.input_ids.to(device))[0].to(dtype=model_dtype)
     max_length = text_input.input_ids.shape[-1]
     if uncond_embeddings is None:
         uncond_input = model.tokenizer(
             [""] * batch_size, padding="max_length", max_length=max_length, return_tensors="pt"
         )
-        uncond_embeddings_ = model.text_encoder(uncond_input.input_ids.to(model.device))[0].to(dtype=model_dtype)
+        uncond_embeddings_ = model.text_encoder(uncond_input.input_ids.to(device))[0].to(dtype=model_dtype)
     else:
         uncond_embeddings_ = None
 
@@ -123,13 +134,14 @@ def p2p_guidance_forward_single_branch(
         return_tensors="pt",
     )
     model_dtype = get_model_dtype(model)
-    text_embeddings = model.text_encoder(text_input.input_ids.to(model.device))[0].to(dtype=model_dtype)
+    device = get_model_device(model)
+    text_embeddings = model.text_encoder(text_input.input_ids.to(device))[0].to(dtype=model_dtype)
     max_length = text_input.input_ids.shape[-1]
     
     uncond_input = model.tokenizer(
         [""] * batch_size, padding="max_length", max_length=max_length, return_tensors="pt"
     )
-    uncond_embeddings_ = model.text_encoder(uncond_input.input_ids.to(model.device))[0].to(dtype=model_dtype)
+    uncond_embeddings_ = model.text_encoder(uncond_input.input_ids.to(device))[0].to(dtype=model_dtype)
 
     latent, latents = init_latent(latent, model, height, width, generator, batch_size)
     latents = latents.to(dtype=model_dtype)
@@ -209,13 +221,14 @@ def direct_inversion_p2p_guidance_forward(
         return_tensors="pt",
     )
     model_dtype = get_model_dtype(model)
-    text_embeddings = model.text_encoder(text_input.input_ids.to(model.device))[0].to(dtype=model_dtype)
+    device = get_model_device(model)
+    text_embeddings = model.text_encoder(text_input.input_ids.to(device))[0].to(dtype=model_dtype)
     max_length = text_input.input_ids.shape[-1]
     
     uncond_input = model.tokenizer(
         [""] * batch_size, padding="max_length", max_length=max_length, return_tensors="pt"
     )
-    uncond_embeddings = model.text_encoder(uncond_input.input_ids.to(model.device))[0].to(dtype=model_dtype)
+    uncond_embeddings = model.text_encoder(uncond_input.input_ids.to(device))[0].to(dtype=model_dtype)
 
     latent, latents = init_latent(latent, model, height, width, generator, batch_size)
     latents = latents.to(dtype=model_dtype)
@@ -251,13 +264,14 @@ def direct_inversion_p2p_guidance_forward_add_target(
         return_tensors="pt",
     )
     model_dtype = get_model_dtype(model)
-    text_embeddings = model.text_encoder(text_input.input_ids.to(model.device))[0].to(dtype=model_dtype)
+    device = get_model_device(model)
+    text_embeddings = model.text_encoder(text_input.input_ids.to(device))[0].to(dtype=model_dtype)
     max_length = text_input.input_ids.shape[-1]
     
     uncond_input = model.tokenizer(
         [""] * batch_size, padding="max_length", max_length=max_length, return_tensors="pt"
     )
-    uncond_embeddings = model.text_encoder(uncond_input.input_ids.to(model.device))[0].to(dtype=model_dtype)
+    uncond_embeddings = model.text_encoder(uncond_input.input_ids.to(device))[0].to(dtype=model_dtype)
 
     latent, latents = init_latent(latent, model, height, width, generator, batch_size)
     latents = latents.to(dtype=model_dtype)

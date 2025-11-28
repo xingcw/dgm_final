@@ -5,7 +5,9 @@ import abc
 from utils.utils import get_word_inds, get_time_words_attention_alpha
 from models.p2p import seq_aligner
 
-MAX_NUM_WORDS = 77
+# MAX_NUM_WORDS is now determined dynamically from tokenizer.model_max_length
+# Keeping for backward compatibility, but should use tokenizer.model_max_length instead
+MAX_NUM_WORDS = 77  # Default fallback, but should be overridden with tokenizer.model_max_length
 LATENT_SIZE = (64, 64)
 LOW_RESOURCE = False 
 
@@ -105,7 +107,9 @@ def register_attention_control(model, controller):
 def get_equalizer(text, word_select, values, tokenizer=None):
     if type(word_select) is int or type(word_select) is str:
         word_select = (word_select,)
-    equalizer = torch.ones(1, 77)
+    # Use tokenizer's model_max_length if available, otherwise fall back to default
+    max_len = tokenizer.model_max_length if tokenizer is not None else MAX_NUM_WORDS
+    equalizer = torch.ones(1, max_len)
     
     for word, val in zip(word_select, values):
         inds = get_word_inds(text, word, tokenizer)
@@ -132,7 +136,8 @@ class LocalBlend:
 
             maps = attention_store["down_cross"][2:4] + attention_store["up_cross"][:3]
             attn_size = self.attn_res
-            maps = [item.reshape(self.alpha_layers.shape[0], -1, 1, attn_size, attn_size, MAX_NUM_WORDS) for item in maps]
+            max_words = self.alpha_layers.shape[-1]  # Use actual size from alpha_layers
+            maps = [item.reshape(self.alpha_layers.shape[0], -1, 1, attn_size, attn_size, max_words) for item in maps]
             maps = torch.cat(maps, dim=1)
             mask = self.get_mask(maps, self.alpha_layers, True)
             if self.substruct_layers is not None:
@@ -144,7 +149,9 @@ class LocalBlend:
 
     def __init__(self, prompts, words, substruct_words=None, start_blend=0.2, th=(.3, .3),
                  tokenizer=None, device="cuda", num_ddim_steps=50, image_size=512):
-        alpha_layers = torch.zeros(len(prompts),  1, 1, 1, 1, MAX_NUM_WORDS)
+        # Use tokenizer's model_max_length if available, otherwise fall back to default
+        max_words = tokenizer.model_max_length if tokenizer is not None else MAX_NUM_WORDS
+        alpha_layers = torch.zeros(len(prompts),  1, 1, 1, 1, max_words)
         for i, (prompt, words_) in enumerate(zip(prompts, words)):
             if type(words_) is str:
                 words_ = [words_]
@@ -153,7 +160,7 @@ class LocalBlend:
                 alpha_layers[i, :, :, :, :, ind] = 1
         
         if substruct_words is not None:
-            substruct_layers = torch.zeros(len(prompts),  1, 1, 1, 1, MAX_NUM_WORDS)
+            substruct_layers = torch.zeros(len(prompts),  1, 1, 1, 1, max_words)
             for i, (prompt, words_) in enumerate(zip(prompts, substruct_words)):
                 if type(words_) is str:
                     words_ = [words_]
@@ -318,6 +325,9 @@ class AttentionControlEdit(AttentionStore, abc.ABC):
                  device="cuda"):
         super(AttentionControlEdit, self).__init__()
         self.batch_size = len(prompts)
+        # Ensure tokenizer is provided - it's required for proper sequence length handling
+        if tokenizer is None:
+            raise ValueError("tokenizer must be provided to AttentionControlEdit. It is required to determine the correct sequence length.")
         self.cross_replace_alpha = get_time_words_attention_alpha(prompts, num_steps, cross_replace_steps, tokenizer).to(device)
         if type(self_replace_steps) is float:
             self_replace_steps = 0, self_replace_steps
@@ -331,14 +341,15 @@ class AttentionReplace(AttentionControlEdit):
         return torch.einsum('hpw,bwn->bhpn', attn_base, self.mapper)
       
     def __init__(self, prompts, num_steps, cross_replace_steps, self_replace_steps,
-                 local_blend = None, tokenizer=None,device="cuda"):
+                 local_blend = None, tokenizer=None, device="cuda"):
         super(AttentionReplace, self).__init__(prompts=prompts, 
                                               num_steps=num_steps, 
                                               cross_replace_steps=cross_replace_steps, 
                                               self_replace_steps=self_replace_steps, 
                                               local_blend=local_blend,
+                                              tokenizer=tokenizer,
                                               device=device)
-        self.mapper = seq_aligner.get_replacement_mapper(prompts, tokenizer).to(device)
+        self.mapper = seq_aligner.get_replacement_mapper(prompts, tokenizer, max_len=None).to(device)
 
 
 class AttentionRefine(AttentionControlEdit):
@@ -350,14 +361,16 @@ class AttentionRefine(AttentionControlEdit):
         return attn_replace
 
     def __init__(self, prompts, num_steps, cross_replace_steps, self_replace_steps,
-                 local_blend = None, tokenizer=None,device="cuda"):
+                 local_blend = None, tokenizer=None, device="cuda"):
         super(AttentionRefine, self).__init__(prompts=prompts, 
                                               num_steps=num_steps, 
                                               cross_replace_steps=cross_replace_steps, 
                                               self_replace_steps=self_replace_steps, 
                                               local_blend=local_blend,
+                                              tokenizer=tokenizer,
                                               device=device)
-        self.mapper, alphas = seq_aligner.get_refinement_mapper(prompts, tokenizer)
+        # Pass max_len=None to use tokenizer.model_max_length dynamically
+        self.mapper, alphas = seq_aligner.get_refinement_mapper(prompts, tokenizer, max_len=None)
         self.mapper, alphas = self.mapper.to(device), alphas.to(device)
         self.alphas = alphas.reshape(alphas.shape[0], 1, 1, alphas.shape[1])
 
@@ -379,12 +392,14 @@ class AttentionReweight(AttentionControlEdit):
                  equalizer,
                  local_blend = None, 
                  controller = None,
+                 tokenizer=None,
                  device="cuda"):
         super(AttentionReweight, self).__init__(prompts=prompts, 
                                                 num_steps=num_steps, 
                                                 cross_replace_steps=cross_replace_steps, 
                                                 self_replace_steps=self_replace_steps, 
                                                 local_blend=local_blend,
+                                                tokenizer=tokenizer,
                                                 device=device)
         self.equalizer = equalizer.to(device)
         self.prev_controller = controller
@@ -430,5 +445,6 @@ def make_controller(pipeline,
                                        self_replace_steps=self_replace_steps, 
                                        equalizer=eq, 
                                        local_blend=lb, 
-                                       controller=controller)
+                                       controller=controller,
+                                       tokenizer=pipeline.tokenizer)
     return controller

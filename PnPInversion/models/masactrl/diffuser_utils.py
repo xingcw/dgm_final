@@ -218,7 +218,7 @@ class MasaCtrlPipeline(StableDiffusionPipeline):
         text_input = self.tokenizer(
             prompt,
             padding="max_length",
-            max_length=77,
+            max_length=self.tokenizer.model_max_length,
             return_tensors="pt"
         )
         text_embeddings = self.text_encoder(text_input.input_ids.to(DEVICE))[0]
@@ -234,7 +234,7 @@ class MasaCtrlPipeline(StableDiffusionPipeline):
             unconditional_input = self.tokenizer(
                 [""] * batch_size,
                 padding="max_length",
-                max_length=77,
+                max_length=self.tokenizer.model_max_length,
                 return_tensors="pt"
             )
             unconditional_embeddings = self.text_encoder(unconditional_input.input_ids.to(DEVICE))[0]

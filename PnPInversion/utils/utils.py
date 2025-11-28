@@ -76,13 +76,21 @@ def init_latent(latent, model, height, width, generator, batch_size):
     else:
         model_dtype = torch.float32
     
+    # Get model device
+    if hasattr(model, 'device'):
+        device = model.device
+    elif hasattr(model, 'unet'):
+        device = next(model.unet.parameters()).device
+    else:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
     if latent is None:
         latent = torch.randn(
             (1, model.unet.in_channels, height // 8, width // 8),
             generator=generator,
             dtype=model_dtype,
         )
-    latents = latent.expand(batch_size,  model.unet.config.in_channels, height // 8, width // 8).to(model.device).to(dtype=model_dtype)
+    latents = latent.expand(batch_size,  model.unet.config.in_channels, height // 8, width // 8).to(device).to(dtype=model_dtype)
     return latent, latents
 
 
@@ -112,6 +120,14 @@ def image2latent(model, image):
     else:
         model_dtype = next(model.parameters()).dtype
     
+    # Get model device
+    # image2latent receives a VAE model directly (model.vae), not a pipeline
+    if hasattr(model, 'device'):
+        device = model.device
+    else:
+        # Get device from model parameters (works for VAE models)
+        device = next(model.parameters()).device
+    
     with torch.no_grad():
         if type(image) is Image:
             image = np.array(image)
@@ -119,7 +135,7 @@ def image2latent(model, image):
             latents = image.to(dtype=model_dtype)
         else:
             image = torch.from_numpy(image).float() / 127.5 - 1
-            image = image.permute(2, 0, 1).unsqueeze(0).to(model.device).to(dtype=model_dtype)
+            image = image.permute(2, 0, 1).unsqueeze(0).to(device).to(dtype=model_dtype)
             latents = model.encode(image)['latent_dist'].mean
             latents = latents * 0.18215
     return latents
@@ -161,7 +177,12 @@ def update_alpha_time_word(alpha, bounds, prompt_ind,
 
 def get_time_words_attention_alpha(prompts, num_steps,
                                    cross_replace_steps,
-                                   tokenizer, max_num_words=77):
+                                   tokenizer, max_num_words=None):
+    if max_num_words is None:
+        if tokenizer is not None:
+            max_num_words = tokenizer.model_max_length
+        else:
+            max_num_words = 77  # Default fallback for backward compatibility
     if type(cross_replace_steps) is not dict:
         cross_replace_steps = {"default_": cross_replace_steps}
     if "default_" not in cross_replace_steps:

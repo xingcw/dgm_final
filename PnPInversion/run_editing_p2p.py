@@ -90,6 +90,9 @@ if __name__ == "__main__":
                         help="Model type: sd21 (~8-10GB), sd15 (~6-8GB), sd14 (~6-8GB)")
     parser.add_argument('--low_memory', action="store_true", 
                         help="Enable memory optimizations (CPU offload, attention slicing)")
+    parser.add_argument('--text_encoder', type=str, default="default", 
+                        choices=["default", "openclip-vith14", "openclip-vith14-336", "siglip2", "qwen3-embedding-0.6b"],
+                        help="Text encoder for SD 2.1. Options: default (original OpenCLIP ViT-H/14 from SD 2.1, 1024-dim), openclip-vith14 (OpenCLIP ViT-H/14 trained on LAION-2B), openclip-vith14-336 (OpenCLIP ViT-H/14 with 336px resolution), siglip-so400m-patch16-384 (SigLIP SO400M, improved CLIP with sigmoid loss), qwen3-embedding-0.6b (Qwen3-Embedding-0.6B, experimental). Note: Only encoders with 1024-dim output are supported.")
     args = parser.parse_args()
     
     rerun_exist_images=args.rerun_exist_images
@@ -99,7 +102,7 @@ if __name__ == "__main__":
     edit_method_list=args.edit_method_list
     
     p2p_editor=P2PEditor(edit_method_list, torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu'),
-                         num_ddim_steps=50, model_type=args.model_type, low_memory=args.low_memory)
+                         num_ddim_steps=50, model_type=args.model_type, low_memory=args.low_memory, text_encoder_type=args.text_encoder)
     
     with open(f"{data_path}/mapping_file.json", "r") as f:
         editing_instruction = json.load(f)

@@ -83,11 +83,12 @@ class NegativePromptInversion:
     def init_prompt(self, prompt):
         # Ensure dtype consistency
         model_dtype = next(self.model.unet.parameters()).dtype
+        device = next(self.model.unet.parameters()).device
         uncond_input = self.model.tokenizer(
             [""], padding="max_length", max_length=self.model.tokenizer.model_max_length,
             return_tensors="pt"
         )
-        uncond_embeddings = self.model.text_encoder(uncond_input.input_ids.to(self.model.device))[0].to(dtype=model_dtype)
+        uncond_embeddings = self.model.text_encoder(uncond_input.input_ids.to(device))[0].to(dtype=model_dtype)
         text_input = self.model.tokenizer(
             [prompt],
             padding="max_length",
@@ -95,7 +96,7 @@ class NegativePromptInversion:
             truncation=True,
             return_tensors="pt",
         )
-        text_embeddings = self.model.text_encoder(text_input.input_ids.to(self.model.device))[0].to(dtype=model_dtype)
+        text_embeddings = self.model.text_encoder(text_input.input_ids.to(device))[0].to(dtype=model_dtype)
         self.context = torch.cat([uncond_embeddings, text_embeddings])
         self.prompt = prompt
 
@@ -217,13 +218,14 @@ class NullInversion:
     def init_prompt(self, prompt: str):
         # Ensure dtype consistency
         model_dtype = next(self.model.unet.parameters()).dtype
+        device = next(self.model.unet.parameters()).device
         uncond_input = self.model.tokenizer(
             [""], 
             padding="max_length", 
             max_length=self.model.tokenizer.model_max_length,
             return_tensors="pt"
         )
-        uncond_embeddings = self.model.text_encoder(uncond_input.input_ids.to(self.model.device))[0].to(dtype=model_dtype)
+        uncond_embeddings = self.model.text_encoder(uncond_input.input_ids.to(device))[0].to(dtype=model_dtype)
         text_input = self.model.tokenizer(
             [prompt],
             padding="max_length",
@@ -231,7 +233,7 @@ class NullInversion:
             truncation=True,
             return_tensors="pt",
         )
-        text_embeddings = self.model.text_encoder(text_input.input_ids.to(self.model.device))[0].to(dtype=model_dtype)
+        text_embeddings = self.model.text_encoder(text_input.input_ids.to(device))[0].to(dtype=model_dtype)
         self.context = torch.cat([uncond_embeddings, text_embeddings])
         self.prompt = prompt
 
@@ -371,7 +373,8 @@ class DirectInversion:
         )
         # Ensure dtype consistency
         model_dtype = next(self.model.unet.parameters()).dtype
-        uncond_embeddings = self.model.text_encoder(uncond_input.input_ids.to(self.model.device))[0].to(dtype=model_dtype)
+        device = next(self.model.unet.parameters()).device
+        uncond_embeddings = self.model.text_encoder(uncond_input.input_ids.to(device))[0].to(dtype=model_dtype)
         text_input = self.model.tokenizer(
             prompt,
             padding="max_length",
@@ -379,7 +382,7 @@ class DirectInversion:
             truncation=True,
             return_tensors="pt",
         )
-        text_embeddings = self.model.text_encoder(text_input.input_ids.to(self.model.device))[0].to(dtype=model_dtype)
+        text_embeddings = self.model.text_encoder(text_input.input_ids.to(device))[0].to(dtype=model_dtype)
         self.context = torch.cat([uncond_embeddings, text_embeddings])
         self.prompt = prompt
 
@@ -387,6 +390,7 @@ class DirectInversion:
     def ddim_loop(self, latent):
         uncond_embeddings, cond_embeddings = self.context.chunk(2)
         cond_embeddings=cond_embeddings[[0]]
+        # Ensure embeddings are on the same device as UNet (get_noise_pred_single will handle device conversion)
         all_latent = [latent]
         latent = latent.clone().detach()
         for i in range(self.num_ddim_steps):
@@ -510,7 +514,8 @@ class DirectInversion:
                 uncond_embeddings.requires_grad = True
                 optimizer = Adam([uncond_embeddings], lr=1e-2 * (1. - i / 100.))
                 for j in range(num_inner_steps):
-                    latents_input = torch.cat([latent_cur] * 2)
+                    model_dtype = next(self.model.unet.parameters()).dtype
+                    latents_input = torch.cat([latent_cur] * 2).to(dtype=model_dtype)
                     noise_pred = self.model.unet(latents_input, t, encoder_hidden_states=torch.cat([uncond_embeddings, cond_embeddings]))["sample"]
                     noise_pred_uncond, noise_prediction_text = noise_pred.chunk(2)
                     noise_pred = noise_pred_uncond + guidance_scale * (noise_prediction_text - noise_pred_uncond)

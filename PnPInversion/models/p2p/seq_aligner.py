@@ -104,7 +104,9 @@ def get_aligned_sequences(x, y, trace_back):
     return x_seq, y_seq, torch.tensor(mapper_y_to_x, dtype=torch.int64)
 
 
-def get_mapper(x, y, tokenizer, max_len=77):
+def get_mapper(x, y, tokenizer, max_len=None):
+    if max_len is None:
+        max_len = tokenizer.model_max_length
     x_seq = tokenizer.encode(x)
     y_seq = tokenizer.encode(y)
     score = ScoreParams(0, 1, -1)
@@ -118,7 +120,9 @@ def get_mapper(x, y, tokenizer, max_len=77):
     return mapper, alphas
 
 
-def get_refinement_mapper(prompts, tokenizer, max_len=77):
+def get_refinement_mapper(prompts, tokenizer, max_len=None):
+    if max_len is None:
+        max_len = tokenizer.model_max_length
     x_seq = prompts[0]
     mappers, alphas = [], []
     for i in range(1, len(prompts)):
@@ -149,7 +153,9 @@ def get_word_inds(text, word_place, tokenizer):
     return np.array(out)
 
 
-def get_replacement_mapper_(x, y, tokenizer, max_len=77):
+def get_replacement_mapper_(x, y, tokenizer, max_len=None):
+    if max_len is None:
+        max_len = tokenizer.model_max_length
     words_x = x.split(' ')
     words_y = y.split(' ')
     if len(words_x) != len(words_y):
@@ -186,7 +192,9 @@ def get_replacement_mapper_(x, y, tokenizer, max_len=77):
 
 
 
-def get_replacement_mapper(prompts, tokenizer, max_len=77):
+def get_replacement_mapper(prompts, tokenizer, max_len=None):
+    if max_len is None:
+        max_len = tokenizer.model_max_length
     x_seq = prompts[0]
     mappers = []
     for i in range(1, len(prompts)):

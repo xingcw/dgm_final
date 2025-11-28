@@ -6,12 +6,13 @@ from models.p2p.p2p_guidance_forward import p2p_guidance_forward, direct_inversi
 from models.p2p.proximal_guidance_forward import proximal_guidance_forward
 from diffusers import StableDiffusionPipeline
 from utils.utils import load_512, load_768, latent2image, txt_draw, resize_and_concat_images
+from models.text_encoders import load_enhanced_text_encoder
 from PIL import Image
 import numpy as np
 import torch
 
 class P2PEditor:
-    def __init__(self, method_list, device, num_ddim_steps=50, model_type="sd14", low_memory=False) -> None:
+    def __init__(self, method_list, device, num_ddim_steps=50, model_type="sd14", low_memory=False, text_encoder_type="default") -> None:
         self.device = device
         self.method_list = method_list
         self.num_ddim_steps = num_ddim_steps
@@ -78,6 +79,9 @@ class P2PEditor:
             self.ldm_stable.enable_vae_slicing()
         if hasattr(self.ldm_stable, 'enable_vae_tiling'):
             self.ldm_stable.enable_vae_tiling()
+            
+        if text_encoder_type != "default":
+            load_enhanced_text_encoder(self.ldm_stable, text_encoder_type, device)
         
         self.ldm_stable.scheduler.set_timesteps(self.num_ddim_steps)
         

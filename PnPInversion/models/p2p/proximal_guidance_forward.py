@@ -139,7 +139,8 @@ def proximal_guidance_forward(
         truncation=True,
         return_tensors="pt",
     )
-    text_embeddings = model.text_encoder(text_input.input_ids.to(model.device))[0]
+    device = next(model.unet.parameters()).device
+    text_embeddings = model.text_encoder(text_input.input_ids.to(device))[0]
     
     if uncond_embeddings is None:
         uncond_input = model.tokenizer(
@@ -149,7 +150,7 @@ def proximal_guidance_forward(
             truncation=True,
             return_tensors="pt"
         )
-        uncond_embeddings_ = model.text_encoder(uncond_input.input_ids.to(model.device))[0]
+        uncond_embeddings_ = model.text_encoder(uncond_input.input_ids.to(device))[0]
     else:
         uncond_embeddings_ = None
 

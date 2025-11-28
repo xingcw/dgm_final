@@ -464,6 +464,96 @@ class DirectInversion:
             
         return noise_loss_list
     
+    def offset_calculate_with_controlnet_multi_level(self, latents, num_inner_steps, epsilon, guidance_scale, 
+                                                      controlnet, controlnet_conditioning_images_multi, 
+                                                      controlnet_conditioning_scale):
+        """
+        Calculate offsets with multi-level ControlNet Canny images.
+        Uses different Canny thresholds for different stages:
+        - Early (0-33%): coarse Canny (global structure)
+        - Middle (33-66%): medium Canny (balanced)
+        - Late (66-100%): fine Canny (details)
+        """
+        noise_loss_list = []
+        latent_cur = torch.concat([latents[-1]]*(self.context.shape[0]//2))
+        
+        # Prepare control images for each level
+        batch_size = latent_cur.shape[0]
+        controlnet_dtype = next(controlnet.parameters()).dtype
+        
+        control_images_prepared = {}
+        for level, img in controlnet_conditioning_images_multi.items():
+            if img.shape[0] != batch_size:
+                control_images_prepared[level] = img.repeat(batch_size, 1, 1, 1).to(dtype=controlnet_dtype)
+            else:
+                control_images_prepared[level] = img.to(dtype=controlnet_dtype)
+        
+        # Stage boundaries (same as forward pass)
+        early_end = int(self.num_ddim_steps * 0.33)
+        middle_end = int(self.num_ddim_steps * 0.66)
+        
+        for i in range(self.num_ddim_steps):            
+            latent_prev = torch.concat([latents[len(latents) - i - 2]]*latent_cur.shape[0])
+            t = self.model.scheduler.timesteps[i]
+            
+            # Select Canny level based on stage
+            if i < early_end:
+                control_image_input = control_images_prepared['coarse']
+            elif i < middle_end:
+                control_image_input = control_images_prepared['medium']
+            else:
+                control_image_input = control_images_prepared['fine']
+            
+            with torch.no_grad():
+                # Get ControlNet outputs
+                latents_controlnet = latent_cur.to(dtype=controlnet_dtype)
+                uncond_embeddings, cond_embeddings = self.context.chunk(2)
+                controlnet_encoder_hidden_states = cond_embeddings.to(dtype=controlnet_dtype)
+                
+                controlnet_output = controlnet(
+                    sample=latents_controlnet,
+                    timestep=t,
+                    encoder_hidden_states=controlnet_encoder_hidden_states,
+                    controlnet_cond=control_image_input,
+                    conditioning_scale=controlnet_conditioning_scale,
+                    return_dict=False,
+                )
+                down_block_res_samples, mid_block_res_sample = controlnet_output
+                
+                # Convert to latent dtype
+                if down_block_res_samples is not None:
+                    down_block_res_samples = [res.to(dtype=latent_cur.dtype) for res in down_block_res_samples]
+                if mid_block_res_sample is not None:
+                    mid_block_res_sample = mid_block_res_sample.to(dtype=latent_cur.dtype)
+                
+                # Duplicate for classifier-free guidance (uncond + cond)
+                latents_input = torch.cat([latent_cur] * 2)
+                if down_block_res_samples is not None:
+                    down_block_res_samples_dup = [torch.cat([res, res], dim=0) for res in down_block_res_samples]
+                    mid_block_res_sample_dup = torch.cat([mid_block_res_sample, mid_block_res_sample], dim=0) if mid_block_res_sample is not None else None
+                else:
+                    down_block_res_samples_dup = None
+                    mid_block_res_sample_dup = None
+                
+                # Get noise prediction WITH ControlNet residuals
+                noise_pred = self.model.unet(
+                    latents_input, 
+                    t, 
+                    encoder_hidden_states=self.context,
+                    down_block_additional_residuals=down_block_res_samples_dup,
+                    mid_block_additional_residual=mid_block_res_sample_dup,
+                )["sample"]
+                
+                noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2)
+                noise_pred_w_guidance = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
+                latents_prev_rec, _ = self.prev_step(noise_pred_w_guidance, t, latent_cur)
+                loss = latent_prev - latents_prev_rec
+                
+            noise_loss_list.append(loss.detach())
+            latent_cur = latents_prev_rec + loss
+            
+        return noise_loss_list
+    
     def invert_with_controlnet(self, image_gt, prompt, guidance_scale, 
                                 controlnet, controlnet_conditioning_image, controlnet_conditioning_scale,
                                 num_inner_steps=10, early_stop_epsilon=1e-5):
@@ -482,17 +572,20 @@ class DirectInversion:
         return image_gt, image_rec, ddim_latents, noise_loss_list
     
     def invert_with_controlnet_separate_offsets(self, image_gt, prompt, guidance_scale, 
-                                                 controlnet, controlnet_conditioning_image, controlnet_conditioning_scale,
+                                                 controlnet, controlnet_conditioning_images_multi, controlnet_conditioning_scale,
                                                  num_inner_steps=10, early_stop_epsilon=1e-5):
         """
-        Invert image and compute SEPARATE offsets for CFG and ControlNet.
+        Invert image and compute SEPARATE offsets for CFG and ControlNet with multi-level Canny.
+        
+        Args:
+            controlnet_conditioning_images_multi: Dict with 'coarse', 'medium', 'fine' Canny images
         
         Returns:
-            - noise_loss_full: Full offset (CFG + ControlNet) for source branch (d3)
+            - noise_loss_full: Full offset (CFG + multi-level ControlNet) for source branch (d3)
             - noise_loss_cfg_only: CFG-only offset for target branch (d1)
             
         Rationale:
-            - Source: d3 → perfect reconstruction
+            - Source: d3 → perfect reconstruction with stage-appropriate Canny
             - Target: d1 → corrects CFG drift but lets ControlNet guide naturally for editing
         """
         self.init_prompt(prompt)
@@ -505,10 +598,10 @@ class DirectInversion:
             ddim_latents, num_inner_steps, early_stop_epsilon, guidance_scale
         )
         
-        # Compute CFG + ControlNet offset (d3) - for source branch
-        noise_loss_full = self.offset_calculate_with_controlnet(
+        # Compute CFG + multi-level ControlNet offset (d3) - for source branch
+        noise_loss_full = self.offset_calculate_with_controlnet_multi_level(
             ddim_latents, num_inner_steps, early_stop_epsilon, guidance_scale,
-            controlnet, controlnet_conditioning_image, controlnet_conditioning_scale
+            controlnet, controlnet_conditioning_images_multi, controlnet_conditioning_scale
         )
         
         return image_gt, image_rec, ddim_latents, noise_loss_full, noise_loss_cfg_only

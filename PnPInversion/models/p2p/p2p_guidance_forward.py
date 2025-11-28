@@ -514,16 +514,20 @@ def direct_inversion_p2p_guidance_forward_controlnet(
     generator = None,
     noise_loss_list = None,
     add_offset=True,
-    controlnet_conditioning_image=None,
+    controlnet_conditioning_images_multi=None,
     controlnet_conditioning_scale=1.0,
-    noise_loss_target_list=None,
+    noise_loss_cfg_only_list=None,
     controlnet_end_ratio=1.0,
 ):
     """Direct inversion p2p guidance forward with ControlNet support.
     
     Args:
-        noise_loss_list: Full offset (CFG + ControlNet) for source branch
-        noise_loss_target_list: Optional offset for target branch (unused now)
+        noise_loss_list: Full offset (CFG + ControlNet) for source branch when ControlNet is ON
+        noise_loss_cfg_only_list: CFG-only offset for source branch when ControlNet is OFF
+        controlnet_conditioning_images_multi: Dict with 'coarse', 'medium', 'fine' Canny images
+            - 'coarse': High thresholds, only major edges (for early steps)
+            - 'medium': Moderate thresholds, balanced edges (for middle steps)
+            - 'fine': Low thresholds, sensitive edges (for late steps)
         controlnet_end_ratio: Ratio of steps to apply ControlNet (0.0-1.0). 
                               E.g., 0.5 means ControlNet only for first 50% of steps.
     """
@@ -552,20 +556,40 @@ def direct_inversion_p2p_guidance_forward_controlnet(
     # Calculate which step to stop using ControlNet
     controlnet_end_step = int(num_inference_steps * controlnet_end_ratio)
     
+    # Define stage boundaries for multi-level Canny (relative to ControlNet active period)
+    # Early: 0% - 33% of ControlNet period -> coarse Canny (global structure)
+    # Middle: 33% - 66% of ControlNet period -> medium Canny (balanced)
+    # Late: 66% - 100% of ControlNet period -> fine Canny (details)
+    early_end = int(controlnet_end_step * 0.33)
+    middle_end = int(controlnet_end_step * 0.66)
+    
     for i, t in enumerate(model.scheduler.timesteps):
         context = torch.cat([uncond_embeddings, text_embeddings])
         
-        # Use ControlNet only for early steps
-        if i < controlnet_end_step:
-            current_controlnet_image = controlnet_conditioning_image
+        # Use ControlNet only for early steps, and switch offset accordingly
+        if i < controlnet_end_step and controlnet_conditioning_images_multi is not None:
+            # Select Canny level based on denoising stage (within ControlNet period)
+            if i < early_end:
+                current_controlnet_image = controlnet_conditioning_images_multi['coarse']
+            elif i < middle_end:
+                current_controlnet_image = controlnet_conditioning_images_multi['medium']
+            else:
+                current_controlnet_image = controlnet_conditioning_images_multi['fine']
+            
             current_controlnet_scale = controlnet_conditioning_scale
+            current_noise_loss = noise_loss_list[i]  # Full offset (CFG + ControlNet)
         else:
             current_controlnet_image = None
             current_controlnet_scale = 0.0
+            # Use CFG-only offset when ControlNet is off
+            if noise_loss_cfg_only_list is not None:
+                current_noise_loss = noise_loss_cfg_only_list[i]
+            else:
+                current_noise_loss = noise_loss_list[i]  # Fallback to full offset
         
         latents = direct_inversion_p2p_guidance_diffusion_step_controlnet(
             model, controller, latents, context, t, guidance_scale, 
-            noise_loss_list[i], current_controlnet_image, 
+            current_noise_loss, current_controlnet_image, 
             current_controlnet_scale, low_resource=False, add_offset=add_offset,
             noise_loss_target=None
         )

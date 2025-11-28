@@ -1084,52 +1084,79 @@ class P2PEditor:
         image_gt = load_512(image_path)
         prompts = [prompt_src, prompt_tar]
 
-        # Generate Canny edge condition image if ControlNet is available
-        control_image = None
+        # Generate multi-level Canny edge condition images for ControlNet
+        # Different thresholds capture different levels of detail:
+        # - Coarse (high thresholds): Only major edges/global structure for early steps
+        # - Medium (moderate thresholds): Balanced edges for middle steps
+        # - Fine (low thresholds): Sensitive edges/details for late steps
+        control_images_multi = None
         canny_pil = None
+        canny_pil_multi = None
         if self.use_controlnet:
             # Convert image to grayscale for Canny edge detection
             image_gray = cv2.cvtColor(image_gt, cv2.COLOR_RGB2GRAY)
             
-            # Apply Canny edge detection
-            # Typical thresholds: low_threshold=100, high_threshold=200
-            canny_image = cv2.Canny(image_gray, 100, 200)
+            # Define threshold levels: (low_threshold, high_threshold)
+            # Coarse: high thresholds - only major edges
+            # Medium: moderate thresholds - balanced
+            # Fine: low thresholds - sensitive to details
+            canny_thresholds = {
+                'coarse': (700,800),   # Early steps: global structure only
+                'medium': (600, 700),   # Middle steps: moderate detail
+                'fine': (500, 600),      # Late steps: fine details
+            }
             
-            # Convert to RGB (3 channels) for ControlNet
-            canny_image_rgb = cv2.cvtColor(canny_image, cv2.COLOR_GRAY2RGB)
-            
-            # Resize to 512x512 if needed
-            if canny_image_rgb.shape[:2] != (512, 512):
-                canny_image_rgb = cv2.resize(canny_image_rgb, (512, 512), interpolation=cv2.INTER_LINEAR)
-            
-            # Convert to PIL Image
-            canny_pil = Image.fromarray(canny_image_rgb)
-            
-            # Convert PIL to tensor and normalize to [-1, 1]
             import torchvision.transforms as transforms
             transform = transforms.Compose([
                 transforms.ToTensor(),  # Converts to [C, H, W] in range [0, 1]
             ])
-            control_image = transform(canny_pil).unsqueeze(0).to(self.device)  # [1, C, H, W]
-            control_image = control_image * 2.0 - 1.0  # Normalize to [-1, 1]
             
-            # Ensure control image matches ControlNet dtype
-            if self.controlnet is not None:
-                controlnet_dtype = next(self.controlnet.parameters()).dtype
-                control_image = control_image.to(dtype=controlnet_dtype)
+            control_images_multi = {}
+            canny_pil_multi = {}  # Store PIL images for visualization
+            for level, (low_thresh, high_thresh) in canny_thresholds.items():
+                # Apply Canny edge detection with level-specific thresholds
+                canny_image = cv2.Canny(image_gray, low_thresh, high_thresh)
+                
+                # Convert to RGB (3 channels) for ControlNet
+                canny_image_rgb = cv2.cvtColor(canny_image, cv2.COLOR_GRAY2RGB)
+                
+                # Resize to 512x512 if needed
+                if canny_image_rgb.shape[:2] != (512, 512):
+                    canny_image_rgb = cv2.resize(canny_image_rgb, (512, 512), interpolation=cv2.INTER_LINEAR)
+                
+                # Store PIL image for visualization
+                canny_pil_level = Image.fromarray(canny_image_rgb)
+                canny_pil_multi[level] = canny_pil_level
+                
+                # Convert PIL to tensor and normalize to [-1, 1]
+                control_image_level = transform(canny_pil_level).unsqueeze(0).to(self.device)
+                control_image_level = control_image_level * 2.0 - 1.0
+                
+                # Ensure control image matches ControlNet dtype
+                if self.controlnet is not None:
+                    controlnet_dtype = next(self.controlnet.parameters()).dtype
+                    control_image_level = control_image_level.to(dtype=controlnet_dtype)
+                
+                control_images_multi[level] = control_image_level
+            
+            # Keep medium canny for backward compatibility
+            canny_pil = canny_pil_multi['medium']
+            
+            print(f"Generated multi-level Canny images: coarse{canny_thresholds['coarse']}, medium{canny_thresholds['medium']}, fine{canny_thresholds['fine']}")
 
         null_inversion = DirectInversion(model=self.ldm_stable,
                                     num_ddim_steps=self.num_ddim_steps)
         
         # Use ControlNet-aware offset calculation with SEPARATE offsets for source and target
-        # noise_loss_full (d3): CFG + ControlNet offset for source branch (perfect reconstruction)
+        # noise_loss_full (d3): CFG + multi-level ControlNet offset for source branch (perfect reconstruction)
         # noise_loss_cfg_only (d1): CFG-only offset for target branch (allows editing)
+        # Uses multi-level Canny: coarse for early steps, medium for middle, fine for late
         _, _, x_stars, noise_loss_full, noise_loss_cfg_only = null_inversion.invert_with_controlnet_separate_offsets(
             image_gt=image_gt, 
             prompt=prompts,
             guidance_scale=guidance_scale,
             controlnet=self.controlnet,
-            controlnet_conditioning_image=control_image,
+            controlnet_conditioning_images_multi=control_images_multi,
             controlnet_conditioning_scale=controlnet_conditioning_scale,
         )
         x_t = x_stars[-1]
@@ -1149,8 +1176,9 @@ class P2PEditor:
             num_inference_steps=self.num_ddim_steps, 
             guidance_scale=guidance_scale, 
             generator=None,
-            controlnet_conditioning_image=control_image,
+            controlnet_conditioning_images_multi=control_images_multi,
             controlnet_conditioning_scale=controlnet_conditioning_scale,
+            noise_loss_cfg_only_list=noise_loss_cfg_only,
             controlnet_end_ratio=controlnet_end_ratio,
         )
     
@@ -1181,8 +1209,9 @@ class P2PEditor:
             num_inference_steps=self.num_ddim_steps, 
             guidance_scale=guidance_scale, 
             generator=None,
-            controlnet_conditioning_image=control_image,
+            controlnet_conditioning_images_multi=control_images_multi,
             controlnet_conditioning_scale=controlnet_conditioning_scale,
+            noise_loss_cfg_only_list=noise_loss_cfg_only,
             controlnet_end_ratio=controlnet_end_ratio,
         )
 
@@ -1191,11 +1220,24 @@ class P2PEditor:
         
         image_instruct = txt_draw(f"source prompt: {prompt_src}\ntarget prompt: {prompt_tar}")
         
-        # Convert Canny image to numpy array for concatenation
-        if canny_pil is not None:
-            canny_array = np.array(canny_pil)
+        # Convert multi-level Canny images to numpy arrays for concatenation
+        if canny_pil_multi is not None:
+            canny_coarse = np.array(canny_pil_multi['coarse'])
+            canny_medium = np.array(canny_pil_multi['medium'])
+            canny_fine = np.array(canny_pil_multi['fine'])
         else:
-            # Fallback: use black image if Canny not computed
-            canny_array = np.zeros((512, 512, 3), dtype=np.uint8)
+            # Fallback: use black images if Canny not computed
+            canny_coarse = np.zeros((512, 512, 3), dtype=np.uint8)
+            canny_medium = np.zeros((512, 512, 3), dtype=np.uint8)
+            canny_fine = np.zeros((512, 512, 3), dtype=np.uint8)
         
-        return Image.fromarray(np.concatenate((image_instruct, image_gt, canny_array, reconstruct_image, images[-1]),axis=1))
+        # Output: instruction | source | canny_coarse | canny_medium | canny_fine | reconstruction | edit
+        return Image.fromarray(np.concatenate((
+            image_instruct, 
+            image_gt, 
+            canny_coarse, 
+            canny_medium, 
+            canny_fine, 
+            reconstruct_image, 
+            images[-1]
+        ), axis=1))

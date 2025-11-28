@@ -22,6 +22,6 @@ python evaluation/evaluate.py --metrics "structure_distance" \
     --tgt_image_folders output/sd21/directinversion+p2p/annotation_images
 
 python compare_methods.py \
-    --csv1 results/evaluation_result_sd21.csv --csv2 results/evaluation_result_sd14.csv \
-    --method1 "sd21_directinversion+p2p" --method2 "sd14_directinversion+p2p" \
-    --output results/comparison_results_sd21_vs_sd14_directinversion+p2p.txt
+    --csvs results/evaluation_result_sd14.csv results/evaluation_result_sd15_v1.csv results/evaluation_result_sd21.csv  \
+    --output results/comparison_results_sd14_vs_sd15_v1_vs_sd21_directinversion+p2p.txt \
+    --latex results/comparison_results_sd14_vs_sd15_v1_vs_sd21_directinversion+p2p.tex

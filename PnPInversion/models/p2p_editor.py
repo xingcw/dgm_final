@@ -5,17 +5,24 @@ from models.p2p.attention_control import EmptyControl, AttentionStore, make_cont
 from models.p2p.p2p_guidance_forward import p2p_guidance_forward, direct_inversion_p2p_guidance_forward, direct_inversion_p2p_guidance_forward_add_target,p2p_guidance_forward_single_branch
 from models.p2p.proximal_guidance_forward import proximal_guidance_forward
 from diffusers import StableDiffusionPipeline
-from utils.utils import load_512, load_768, latent2image, txt_draw, resize_and_concat_images
+from utils.utils import load_512, load_768, latent2image, txt_draw, resize_and_concat_images, image2latent
 from PIL import Image
 import numpy as np
 import torch
+import re
+from transformers import AutoTokenizer, AutoModelForCausalLM
 
 class P2PEditor:
-    def __init__(self, method_list, device, num_ddim_steps=50, model_type="sd14", low_memory=False) -> None:
+    def __init__(self, method_list, device, num_ddim_steps=50, model_type="sd14", low_memory=False, 
+                 use_llm_for_prompts=False, llm_model_name="Qwen/Qwen2.5-1.5B-Instruct") -> None:
         self.device = device
         self.method_list = method_list
         self.num_ddim_steps = num_ddim_steps
         self.model_type = model_type
+        self.use_llm_for_prompts = use_llm_for_prompts
+        self.llm_model_name = llm_model_name
+        self.llm_tokenizer = None
+        self.llm_model = None
         # Set image size based on model type
         if model_type == "sd21":
             self.image_size = 768
@@ -196,6 +203,10 @@ class P2PEditor:
                                         blend_word=blend_word, eq_params=eq_params, is_replace_controller=is_replace_controller)
         elif edit_method=="ablation_directinversion_add-source+p2p":
             return self.edit_image_directinversion_add_source(image_path=image_path, prompt_src=prompt_src, prompt_tar=prompt_tar, guidance_scale=guidance_scale, 
+                                        cross_replace_steps=cross_replace_steps, self_replace_steps=self_replace_steps, 
+                                        blend_word=blend_word, eq_params=eq_params, is_replace_controller=is_replace_controller)
+        elif edit_method=="directinversion+p2p_multistep_delete":
+            return self.edit_image_directinversion_multistep_delete(image_path=image_path, prompt_src=prompt_src, prompt_tar=prompt_tar, guidance_scale=guidance_scale, 
                                         cross_replace_steps=cross_replace_steps, self_replace_steps=self_replace_steps, 
                                         blend_word=blend_word, eq_params=eq_params, is_replace_controller=is_replace_controller)
         else:
@@ -504,6 +515,7 @@ class P2PEditor:
         blend_word=None,
         eq_params=None,
         is_replace_controller=False,
+        return_components=False,
     ):
         image_gt = self.load_image(image_path)
         prompts = [prompt_src, prompt_tar]
@@ -554,12 +566,21 @@ class P2PEditor:
                                        generator=None)
 
         images = latent2image(model=self.ldm_stable.vae, latents=latents)
+        edited_image = images[-1]
 
+        if return_components:
+            return {
+                'instruction': txt_draw(f"source prompt: {prompt_src}\ntarget prompt: {prompt_tar}", 
+                                      target_size=[self.image_size, self.image_size]),
+                'original': image_gt,
+                'reconstruction': reconstruct_image,
+                'edited': edited_image,
+            }
         
         image_instruct = txt_draw(f"source prompt: {prompt_src}\ntarget prompt: {prompt_tar}", 
                                       target_size=[self.image_size, self.image_size])
         
-        concat_image = resize_and_concat_images(image_instruct, image_gt, reconstruct_image, images[-1])
+        concat_image = resize_and_concat_images(image_instruct, image_gt, reconstruct_image, edited_image)
         
         return concat_image
 
@@ -1083,3 +1104,224 @@ class P2PEditor:
                                       target_size=[self.image_size, self.image_size])
         
         return Image.fromarray(np.concatenate((image_instruct, image_gt, reconstruct_image,images[-1]),axis=1))
+
+    def _load_llm(self):
+        """Lazy load the LLM model if not already loaded."""
+        if not self.use_llm_for_prompts:
+            return None
+        
+        if self.llm_model is None:
+            print(f"Loading LLM model: {self.llm_model_name}")
+            self.llm_tokenizer = AutoTokenizer.from_pretrained(
+                self.llm_model_name,
+                trust_remote_code=True
+            )
+            self.llm_model = AutoModelForCausalLM.from_pretrained(
+                self.llm_model_name,
+                torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+                device_map="auto" if torch.cuda.is_available() else None,
+                trust_remote_code=True
+            )
+            if torch.cuda.is_available() and not self.llm_model.device.type == 'cuda':
+                self.llm_model = self.llm_model.to(self.device)
+            print("LLM model loaded successfully")
+        
+        return self.llm_model
+    
+    def _generate_intermediate_prompt(self, prompt_src, prompt_tar, blend_word=None):
+        """
+        Generate an intermediate prompt for multi-step deletion.
+        Transforms the object into something smaller/less salient.
+        
+        Uses Qwen3 LLM if available, otherwise falls back to heuristic-based generation.
+        """
+        # Try LLM-based generation if enabled
+        if self.use_llm_for_prompts:
+            llm_model = self._load_llm()
+            if llm_model is not None:
+                return self._generate_prompt_with_llm(prompt_src, prompt_tar, blend_word)
+        else:
+            return prompt_tar
+    
+    def _generate_prompt_with_llm(self, prompt_src, prompt_tar, blend_word=None):
+        """
+        Generate intermediate prompt using Qwen3 thinking model.
+        
+        The LLM analyzes the source and target prompts to identify what needs to be deleted,
+        and generates an intermediate prompt optimized for direct inversion + P2P editing.
+        """
+        # Construct the prompt for the LLM - let it figure out what to delete
+        system_prompt = """You are an expert at generating image prompts for diffusion model editing, specifically for direct inversion + Prompt-to-Prompt (P2P) editing workflows.
+
+Your task is to analyze image prompts and generate intermediate prompts that facilitate object or background deletion through a two-step process:
+1. First step: Transform the object or background to be deleted into something smaller/less salient, keep other words the same
+2. Second step: Try to remove the small thing or background defined in the intermediate prompt, keep other words the same
+
+Key principles for effective intermediate prompts:
+- It should be natural and descriptive, not awkward or forced
+- The prompt should help break down the geometry/structure of the object gradually, making it easier to remove in the second step"""
+        
+        user_prompt = f"""Analyze these two image prompts and generate an intermediate prompt for a two-step deletion process:
+
+Source prompt: "{prompt_src}"
+Target prompt: "{prompt_tar}"
+
+Task:
+1. Identify what object(s) or element(s) are being deleted (compare source vs target)
+2. Generate an intermediate prompt that:
+   - Transforms the identified object(s) into something smaller, less prominent, or more subtle
+   - Makes the final deletion step easier for the diffusion model
+   - Is natural and flows logically from source → intermediate → target
+   - The length of the intermediate prompt should be the same as the source prompt or target prompt
+
+Example:
+original Source prompt: 'a Ukiyo-e of seagull flying over the ocean waves with sun rise'
+original Target prompt: 'a Ukiyo-e of seagull flying over the ocean waves'
+
+edited Source prompt: 'a Ukiyo-e of seagull flying over the ocean waves with big sun rise'
+edited Intermediate prompt: 'a Ukiyo-e of seagull flying over the ocean waves with small sun rise'
+edited Target prompt: 'a Ukiyo-e of seagull flying over the ocean waves with no sun rise'
+
+output the edited Source prompt, edited Intermediate prompt, and edited Target prompt, and separate them with '|||'. wihtout any explanation, quotes, or additional text."""
+
+        # Format for Qwen3 thinking model chat format
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ]
+        
+        # Tokenize and generate with thinking mode enabled
+        text = self.llm_tokenizer.apply_chat_template(
+            messages, 
+            tokenize=False, 
+            add_generation_prompt=True,
+            enable_thinking=True  # Enable thinking mode for Qwen3
+        )
+        model_inputs = self.llm_tokenizer([text], return_tensors="pt").to(self.llm_model.device)
+        
+        with torch.no_grad():
+            generated_ids = self.llm_model.generate(
+                **model_inputs,
+                max_new_tokens=32768
+            )
+        
+        output_ids = generated_ids[0][len(model_inputs.input_ids[0]):].tolist() 
+
+        # parsing thinking content
+        try:
+            # rindex finding 151668 (</think>)
+            index = len(output_ids) - output_ids[::-1].index(151668)
+        except ValueError:
+            index = 0
+
+        content = self.llm_tokenizer.decode(output_ids[index:], skip_special_tokens=True).strip("\n")
+        
+        prompt_src, prompt_mid, prompt_tar = content.strip().split('|||')
+        prompt_src = prompt_src.strip('"').strip("'")
+        prompt_mid = prompt_mid.strip('"').strip("'")
+        prompt_tar = prompt_tar.strip('"').strip("'")
+        
+        return prompt_src, prompt_mid, prompt_tar
+
+    def edit_image_directinversion_multistep_delete(
+        self,
+        image_path,
+        prompt_src,
+        prompt_tar,
+        guidance_scale=7.5,
+        cross_replace_steps=0.4,
+        self_replace_steps=0.6,
+        blend_word=None,
+        eq_params=None,
+        is_replace_controller=False
+    ):
+        """
+        Pattern 3: Multi-step edit - "transform then delete"
+        
+        Step 1: Transform object into something smaller/less salient (src → mid)
+        Step 2: Delete/wash out the remaining small thing (mid → tgt)
+        
+        Simplified implementation: generates intermediate prompts and calls edit_image_directinversion twice.
+        """
+        import tempfile
+        import os
+        
+        edited_prompt_src, edited_prompt_mid, edited_prompt_tar = self._generate_intermediate_prompt(prompt_src, prompt_tar, blend_word)
+        print(f"Auto-generated intermediate prompt: {edited_prompt_src} → {edited_prompt_mid} → {edited_prompt_tar}")
+        
+        # ========== STEP 1: Transform object to something smaller/less salient ==========
+        print(f"Step 1: Transforming '{edited_prompt_src}' → '{edited_prompt_mid}' → '{edited_prompt_tar}'")
+        result_step1 = self.edit_image_directinversion(
+            image_path=image_path,
+            prompt_src=edited_prompt_src,
+            prompt_tar=edited_prompt_mid,
+            guidance_scale=guidance_scale,
+            cross_replace_steps=cross_replace_steps,
+            self_replace_steps=self_replace_steps,
+            blend_word=blend_word,
+            eq_params=eq_params,
+            is_replace_controller=is_replace_controller,
+            return_components=True,
+        )
+        
+        # Extract the edited image from step 1 result
+        intermediate_image = result_step1['edited']
+        
+        # Convert to PIL Image if it's a numpy array
+        if isinstance(intermediate_image, np.ndarray):
+            intermediate_image = Image.fromarray(intermediate_image)
+        
+        # Save intermediate image to temporary file for step 2
+        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp_file:
+            tmp_image_path = tmp_file.name
+            intermediate_image.save(tmp_image_path)
+        
+        try:
+            # ========== STEP 2: Delete the remaining small thing ==========
+            print(f"Step 2: Deleting '{edited_prompt_mid}' → '{edited_prompt_tar}'")
+            result_step2 = self.edit_image_directinversion(
+                image_path=tmp_image_path,
+                prompt_src=edited_prompt_mid,
+                prompt_tar=edited_prompt_tar,
+                guidance_scale=guidance_scale,
+                cross_replace_steps=cross_replace_steps,
+                self_replace_steps=self_replace_steps,
+                blend_word=blend_word,
+                eq_params=eq_params,
+                is_replace_controller=is_replace_controller,
+                return_components=True,
+            )
+            
+            # Extract images from both results for final visualization
+            # Step 1 components
+            original_img = result_step1['original']
+            recon_step1_img = result_step1['reconstruction']
+            intermediate_img = result_step1['edited']
+            
+            # Step 2 components
+            recon_step2_img = result_step2['reconstruction']
+            final_img = result_step2['edited']
+            
+            # Create new instruction image
+            image_instruct = txt_draw(
+                f"Pattern 3: Multi-step Delete\n"
+                f"Step 1: {prompt_src} → {edited_prompt_mid}\n"
+                f"Step 2: {edited_prompt_mid} → {prompt_tar}", 
+                target_size=[self.image_size, self.image_size])
+            
+            # Concatenate all images: instruction, original, recon_step1, intermediate, recon_step2, final
+            resized_images = []
+            for img in [image_instruct, original_img, recon_step1_img, 
+                        intermediate_img, recon_step2_img, final_img]:
+                if isinstance(img, np.ndarray):
+                    img = Image.fromarray(img)
+                resized_images.append(img.resize((self.image_size, self.image_size)))
+            
+            concat_image = Image.fromarray(np.concatenate(resized_images, axis=1))
+            
+            return concat_image
+            
+        finally:
+            # Clean up temporary file
+            if os.path.exists(tmp_image_path):
+                os.unlink(tmp_image_path)

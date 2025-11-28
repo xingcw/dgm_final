@@ -75,7 +75,8 @@ image_save_paths={
     "ablation_directinversion_interval_49+p2p":"ablation_directinversion_interval_49+p2p",
     "ablation_null-text-inversion_single_branch+p2p":"ablation_null-text-inversion_single_branch+p2p",
     "ablation_directinversion_add-source+p2p":"ablation_directinversion_add-source+p2p",
-    "ablation_directinversion_add-target+p2p":"ablation_directinversion_add-target+p2p"
+    "ablation_directinversion_add-target+p2p":"ablation_directinversion_add-target+p2p",
+    "directinversion+p2p_multistep_delete":"directinversion+p2p_multistep_delete"
     }
 
 
@@ -90,6 +91,10 @@ if __name__ == "__main__":
                         help="Model type: sd21 (~8-10GB), sd15 (~6-8GB), sd14 (~6-8GB)")
     parser.add_argument('--low_memory', action="store_true", 
                         help="Enable memory optimizations (CPU offload, attention slicing)")
+    parser.add_argument('--use_llm_for_prompts', action="store_true",
+                        help="Use Qwen3 LLM to generate intermediate prompts for multi-step deletion")
+    parser.add_argument('--llm_model_name', type=str, default="Qwen/Qwen2.5-1.5B-Instruct",
+                        help="HuggingFace model name for LLM (default: Qwen/Qwen2.5-1.5B-Instruct)")
     args = parser.parse_args()
     
     rerun_exist_images=args.rerun_exist_images
@@ -99,7 +104,8 @@ if __name__ == "__main__":
     edit_method_list=args.edit_method_list
     
     p2p_editor=P2PEditor(edit_method_list, torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu'),
-                         num_ddim_steps=50, model_type=args.model_type, low_memory=args.low_memory)
+                         num_ddim_steps=50, model_type=args.model_type, low_memory=args.low_memory,
+                         use_llm_for_prompts=args.use_llm_for_prompts, llm_model_name=args.llm_model_name)
     
     with open(f"{data_path}/mapping_file.json", "r") as f:
         editing_instruction = json.load(f)

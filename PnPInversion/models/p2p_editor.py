@@ -4,8 +4,8 @@ from models.p2p.inversion import NegativePromptInversion, NullInversion, DirectI
 from models.p2p.attention_control import EmptyControl, AttentionStore, make_controller
 from models.p2p.p2p_guidance_forward import p2p_guidance_forward, direct_inversion_p2p_guidance_forward, direct_inversion_p2p_guidance_forward_add_target,p2p_guidance_forward_single_branch
 from models.p2p.proximal_guidance_forward import proximal_guidance_forward
-from diffusers import StableDiffusionPipeline
-from utils.utils import load_512, load_768, latent2image, txt_draw, resize_and_concat_images
+from diffusers import StableDiffusionPipeline, StableDiffusionXLPipeline
+from utils.utils import load_512, load_768, load_1024, latent2image, txt_draw, resize_and_concat_images
 from PIL import Image
 import numpy as np
 import torch
@@ -17,7 +17,9 @@ class P2PEditor:
         self.num_ddim_steps = num_ddim_steps
         self.model_type = model_type
         # Set image size based on model type
-        if model_type == "sd21":
+        if model_type == "sdxl":
+            self.image_size = 1024
+        elif model_type == "sd21":
             self.image_size = 768
         else:
             self.image_size = 512
@@ -34,7 +36,7 @@ class P2PEditor:
                 prediction_type="v_prediction"  # SD 2.x uses v_prediction
             )
         else:
-            # SD 1.5 and SD 1.4 use epsilon prediction
+            # SD 1.5, SD 1.4, and SDXL use epsilon prediction
             self.scheduler = DDIMSchedulerDev(
                 beta_start=0.00085,
                 beta_end=0.012,
@@ -43,7 +45,15 @@ class P2PEditor:
                 set_alpha_to_one=False
             )
         
-        if model_type == "sd21":
+        if model_type == "sdxl":
+            # Load SDXL pipeline - uses epsilon prediction and two text encoders
+            self.ldm_stable = StableDiffusionXLPipeline.from_pretrained(
+                "stabilityai/stable-diffusion-xl-base-1.0",
+                scheduler=self.scheduler,
+                torch_dtype=torch.float16,
+            )
+            print("Loaded SDXL with dtype: ", self.ldm_stable.dtype)
+        elif model_type == "sd21":
             # Load SD 2.1 pipeline - uses v_prediction
             self.ldm_stable = StableDiffusionPipeline.from_pretrained(
                 "sd2-community/stable-diffusion-2",
@@ -87,7 +97,9 @@ class P2PEditor:
     
     def load_image(self, image_path):
         """Load image based on model type"""
-        if self.model_type == "sd21":
+        if self.model_type == "sdxl":
+            return load_1024(image_path)
+        elif self.model_type == "sd21":
             return load_768(image_path)
         else:
             return load_512(image_path)

@@ -86,8 +86,8 @@ if __name__ == "__main__":
     parser.add_argument('--output_path', type=str, default="output") # the editing category that needed to run
     parser.add_argument('--edit_category_list', nargs = '+', type=str, default=["0","1","2","3","4","5","6","7","8","9"]) # the editing category that needed to run
     parser.add_argument('--edit_method_list', nargs = '+', type=str, default=["ddim+p2p"]) # the editing methods that needed to run
-    parser.add_argument('--model_type', type=str, default="sd14", choices=["sd21", "sd15", "sd14"],
-                        help="Model type: sd21 (~8-10GB), sd15 (~6-8GB), sd14 (~6-8GB)")
+    parser.add_argument('--model_type', type=str, default="sd14", choices=["sdxl", "sd21", "sd15", "sd14"],
+                        help="Model type: sdxl (~12-14GB), sd21 (~8-10GB), sd15 (~6-8GB), sd14 (~6-8GB)")
     parser.add_argument('--low_memory', action="store_true", 
                         help="Enable memory optimizations (CPU offload, attention slicing)")
     args = parser.parse_args()

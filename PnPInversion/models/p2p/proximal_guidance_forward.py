@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 
 from models.p2p.attention_control import register_attention_control
-from models.p2p.p2p_guidance_forward import get_model_image_size
+from models.p2p.p2p_guidance_forward import get_model_image_size, encode_prompt_for_model, get_sdxl_unet_kwargs
 from utils.utils import init_latent
 
 def dilate(image, kernel_size, stride=1, padding=0):
@@ -23,12 +23,44 @@ def proximal_guidance_diffusion_step(model, controller, latents, context, t, gui
                    inversion_guidance=False, x_stars=None, i=0,
                    dilate_mask=0,):
     
+    # For SDXL, need to provide added_cond_kwargs
+    is_sdxl = hasattr(model, 'text_encoder_2')
+    added_cond_kwargs = None
+    if is_sdxl:
+        pooled_embeds = context.mean(dim=1) if context.dim() == 3 else context
+        if pooled_embeds.dim() == 1:
+            pooled_embeds = pooled_embeds.unsqueeze(0)
+        # Use get_sdxl_unet_kwargs to properly format added_cond_kwargs
+        added_cond_kwargs = get_sdxl_unet_kwargs(
+            model, pooled_embeds, context.shape[0], model.device, dtype=pooled_embeds.dtype
+        )
+    
     if low_resource:
-        noise_pred_uncond = model.unet(latents, t, encoder_hidden_states=context[0])["sample"]
-        noise_prediction_text = model.unet(latents, t, encoder_hidden_states=context[1])["sample"]
+        if is_sdxl:
+            # For low_resource, need separate added_cond_kwargs for uncond and cond
+            pooled_embeds_uncond = pooled_embeds[0:1] if pooled_embeds.shape[0] >= 1 else pooled_embeds
+            pooled_embeds_cond = pooled_embeds[1:2] if pooled_embeds.shape[0] >= 2 else pooled_embeds[0:1]
+            added_cond_kwargs_uncond = get_sdxl_unet_kwargs(
+                model, pooled_embeds_uncond, 1, model.device, dtype=pooled_embeds.dtype
+            )
+            added_cond_kwargs_cond = get_sdxl_unet_kwargs(
+                model, pooled_embeds_cond, 1, model.device, dtype=pooled_embeds.dtype
+            )
+            noise_pred_uncond = model.unet(latents, t, encoder_hidden_states=context[0], added_cond_kwargs=added_cond_kwargs_uncond)["sample"]
+            noise_prediction_text = model.unet(latents, t, encoder_hidden_states=context[1], added_cond_kwargs=added_cond_kwargs_cond)["sample"]
+        else:
+            noise_pred_uncond = model.unet(latents, t, encoder_hidden_states=context[0])["sample"]
+            noise_prediction_text = model.unet(latents, t, encoder_hidden_states=context[1])["sample"]
     else:
         latents_input = torch.cat([latents] * 2)
-        noise_pred = model.unet(latents_input, t, encoder_hidden_states=context)["sample"]
+        if is_sdxl:
+            pooled_embeds_repeated = pooled_embeds.repeat(2, 1) if pooled_embeds.shape[0] == 1 else pooled_embeds
+            added_cond_kwargs = get_sdxl_unet_kwargs(
+                model, pooled_embeds_repeated, context.shape[0], model.device, dtype=pooled_embeds.dtype
+            )
+            noise_pred = model.unet(latents_input, t, encoder_hidden_states=context, added_cond_kwargs=added_cond_kwargs)["sample"]
+        else:
+            noise_pred = model.unet(latents_input, t, encoder_hidden_states=context)["sample"]
         noise_pred_uncond, noise_prediction_text = noise_pred.chunk(2)
     step_kwargs = {
         'ref_image': None,
@@ -132,24 +164,12 @@ def proximal_guidance_forward(
     register_attention_control(model, controller)
     height = width = get_model_image_size(model)
     
-    text_input = model.tokenizer(
-        prompt,
-        padding="max_length",
-        max_length=model.tokenizer.model_max_length,
-        truncation=True,
-        return_tensors="pt",
-    )
-    text_embeddings = model.text_encoder(text_input.input_ids.to(model.device))[0]
+    # Use encode_prompt_for_model to handle both SD/SD2.1 and SDXL
+    text_embeddings = encode_prompt_for_model(model, prompt, device=model.device)
     
     if uncond_embeddings is None:
-        uncond_input = model.tokenizer(
-            [""] * batch_size, 
-            padding="max_length", 
-            max_length=model.tokenizer.model_max_length, 
-            truncation=True,
-            return_tensors="pt"
-        )
-        uncond_embeddings_ = model.text_encoder(uncond_input.input_ids.to(model.device))[0]
+        # Encode unconditional prompts
+        uncond_embeddings_ = encode_prompt_for_model(model, [""] * batch_size, device=model.device)
     else:
         uncond_embeddings_ = None
 

@@ -12,7 +12,8 @@ python run_editing_controlnet.py \
     --data_path data \
     --output_path output/${MODEL_NAME} \
     --edit_category_list 5 \
-    --conditioning_scale 0.1
+    --conditioning_scale 0.1 \
+    --controlnet_end_ratio 0.0
 
 # python run_editing_p2p.py \
 #     --data_path data \

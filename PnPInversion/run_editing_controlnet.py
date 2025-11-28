@@ -91,6 +91,12 @@ def parse_args() -> argparse.Namespace:
         help="Disable hand and face keypoint detection in the OpenPose detector.",
     )
     parser.add_argument("--seed", type=int, default=1234, help="Random seed for reproducibility.")
+    parser.add_argument(
+        "--controlnet_end_ratio",
+        type=float,
+        default=0.5,
+        help="Ratio of steps to apply ControlNet (0.0-1.0). E.g., 0.5 means ControlNet only for first 50%% of steps.",
+    )
     return parser.parse_args()
 
 
@@ -153,6 +159,7 @@ def main() -> None:
                     controlnet_conditioning_scale=args.conditioning_scale,
                     detect_resolution=args.detect_resolution,
                     include_hand_and_face=include_hand_and_face,
+                    controlnet_end_ratio=args.controlnet_end_ratio,
                 )
                 
                 # Save result image

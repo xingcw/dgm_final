@@ -93,7 +93,12 @@ def init_latent(latent, model, height, width, generator, batch_size):
     # Use config to avoid deprecation warning
     in_channels = model.unet.config.in_channels
     # Get model dtype
-    model_dtype = next(model.unet.parameters()).dtype
+    if hasattr(model, 'dtype'):
+        model_dtype = model.dtype
+    elif hasattr(model, 'unet'):
+        model_dtype = next(model.unet.parameters()).dtype
+    else:
+        model_dtype = torch.float32
     
     if latent is None:
         latent = torch.randn(
@@ -109,59 +114,54 @@ def init_latent(latent, model, height, width, generator, batch_size):
 VAE_SCALING_FACTOR_SD15 = 0.18215
 VAE_SCALING_FACTOR_SDXL = 0.13025
 
-def get_vae_scaling_factor(model):
+def get_vae_scaling_factor(is_sdxl):
     """Get the appropriate VAE scaling factor based on model type."""
-    is_sdxl = getattr(model, 'is_sdxl', False)
     if is_sdxl:
         return VAE_SCALING_FACTOR_SDXL
     else:
         return VAE_SCALING_FACTOR_SD15
 
 @torch.no_grad()
-def latent2image(model, latents, return_type='np', is_sdxl=None):
-    # Handle both pipeline and VAE being passed
-    vae = model.vae if hasattr(model, 'vae') else model
+def latent2image(model, latents, return_type='np'):
+    is_sdxl = model.is_sdxl
+    # Get model dtype (VAE model dtype)
+    if hasattr(model, 'dtype'):
+        model_dtype = model.dtype
+    else:
+        model_dtype = next(model.parameters()).dtype
     
-    # Auto-detect model type
-    if is_sdxl is None:
-        is_sdxl = getattr(model, 'is_sdxl', False)
+    # Ensure latents match model dtype
+    latents = latents.detach().to(dtype=model_dtype)
+    scaling_factor = get_vae_scaling_factor(is_sdxl)
     
-    scaling_factor = get_vae_scaling_factor(model)
-    
-    latents = 1 / scaling_factor * latents.detach()
-    
-    # Use model dtype for decoding (no dtype conversion needed with improved VAE)
-    model_dtype = next(vae.parameters()).dtype
-    latents = latents.to(dtype=model_dtype)
-    image = vae.decode(latents)['sample']
-    
+    latents = 1 / scaling_factor * latents
+    image = model.vae.decode(latents)['sample']
     if return_type == 'np':
         image = (image / 2 + 0.5).clamp(0, 1)
-        # Handle any NaN values
-        image = torch.nan_to_num(image, nan=0.0, posinf=1.0, neginf=0.0)
         image = image.cpu().permute(0, 2, 3, 1).numpy()
         image = (image * 255).astype(np.uint8)
     return image
 
 @torch.no_grad()
-def image2latent(model, image, is_sdxl=None):
-    # Handle both pipeline and VAE being passed
-    vae = model.vae if hasattr(model, 'vae') else model
-    scaling_factor = get_vae_scaling_factor(model)
-    
-    # Get device from model parameters
-    device = next(vae.parameters()).device
-    vae_dtype = next(vae.parameters()).dtype
+def image2latent(model, image):
+    is_sdxl = model.is_sdxl
+    scaling_factor = get_vae_scaling_factor(is_sdxl)
+
+    # Get model dtype (VAE model dtype)
+    if hasattr(model, 'dtype'):
+        model_dtype = model.dtype
+    else:
+        model_dtype = next(model.parameters()).dtype
     
     with torch.no_grad():
         if type(image) is Image:
             image = np.array(image)
         if type(image) is torch.Tensor and image.dim() == 4:
-            latents = image
+            latents = image.to(dtype=model_dtype)
         else:
             image = torch.from_numpy(image).float() / 127.5 - 1
-            image = image.permute(2, 0, 1).unsqueeze(0).to(device=device, dtype=vae_dtype)
-            latents = vae.encode(image)['latent_dist'].mean
+            image = image.permute(2, 0, 1).unsqueeze(0).to(model.device).to(dtype=model_dtype)
+            latents = model.vae.encode(image)['latent_dist'].mean
             latents = latents * scaling_factor
     return latents
 
@@ -219,8 +219,7 @@ def get_time_words_attention_alpha(prompts, num_steps,
     alpha_time_words = alpha_time_words.reshape(num_steps + 1, len(prompts) - 1, 1, 1, max_num_words)
     return alpha_time_words
 
-def txt_draw(text,
-                target_size=[512,512]):
+def txt_draw(text, target_size=[512,512]):
     plt.figure(dpi=300,figsize=(1,1))
     plt.text(-0.1, 1.1, text,fontsize=3.5, wrap=True,verticalalignment="top",horizontalalignment="left")
     plt.axis('off')
@@ -238,3 +237,14 @@ def txt_draw(text,
     plt.close('all')
     
     return image
+
+
+def resize_and_concat_images(image_instruct, image_gt, reconstruct_image, edited_image):
+    resized_images = []
+
+    for image in [image_instruct, image_gt, reconstruct_image, edited_image]:
+        if isinstance(image, np.ndarray):
+            image = Image.fromarray(image)
+        resized_images.append(image.resize((512, 512)))
+
+    return Image.fromarray(np.concatenate(resized_images, axis=1))

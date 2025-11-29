@@ -146,7 +146,7 @@ class NegativePromptInversion:
         return next_sample
     
     def get_noise_pred_single(self, latents, t, context):
-        # Ensure proper dtype
+        # Ensure dtype consistency
         model_dtype = next(self.model.unet.parameters()).dtype
         latents = latents.to(dtype=model_dtype)
         context = context.to(dtype=model_dtype)
@@ -217,8 +217,8 @@ class NegativePromptInversion:
 
     @torch.no_grad()
     def ddim_inversion(self, image):
-        latent = image2latent(self.model, image, is_sdxl=self.is_sdxl)
-        image_rec = latent2image(self.model, latent, is_sdxl=self.is_sdxl)[0]
+        latent = image2latent(self.model, image)
+        image_rec = latent2image(self.model, latent)[0]
         ddim_latents = self.ddim_loop(latent)
         return image_rec, ddim_latents, latent
 
@@ -253,11 +253,9 @@ class NegativePromptInversion:
         self.prompt = None
         self.context = None
         self.num_ddim_steps = num_ddim_steps
-        self.is_sdxl = getattr(model, 'is_sdxl', False)
+        self.is_sdxl = model.is_sdxl
         self.added_cond_kwargs = None
         self.pooled_context = None
-
-
 
 
 class NullInversion:
@@ -289,7 +287,7 @@ class NullInversion:
         return next_sample
     
     def get_noise_pred_single(self, latents, t, context):
-        # Ensure proper dtype
+        # Ensure dtype consistency
         model_dtype = next(self.model.unet.parameters()).dtype
         latents = latents.to(dtype=model_dtype)
         context = context.to(dtype=model_dtype)
@@ -305,10 +303,9 @@ class NullInversion:
         return noise_pred
 
     def get_noise_pred(self, latents, t, guidance_scale, is_forward=True, context=None):
-        # Ensure proper dtype
+        # Ensure dtype consistency
         model_dtype = next(self.model.unet.parameters()).dtype
         latents = latents.to(dtype=model_dtype)
-        
         latents_input = torch.cat([latents] * 2)
         if context is None:
             context = self.context
@@ -330,6 +327,7 @@ class NullInversion:
             latents = self.next_step(noise_pred, t, latents)
         else:
             latents = self.prev_step(noise_pred, t, latents)
+        latents = latents.to(dtype=model_dtype)
         return latents
 
     @torch.no_grad()
@@ -390,8 +388,8 @@ class NullInversion:
 
     @torch.no_grad()
     def ddim_inversion(self, image):
-        latent = image2latent(self.model, image, is_sdxl=self.is_sdxl)
-        image_rec = latent2image(self.model, latent, is_sdxl=self.is_sdxl)[0]
+        latent = image2latent(self.model, image)
+        image_rec = latent2image(self.model, latent)[0]
         ddim_latents = self.ddim_loop(latent)
         return image_rec, ddim_latents
 
@@ -441,7 +439,7 @@ class NullInversion:
         self.prompt = None
         self.context = None
         self.num_ddim_steps = num_ddim_steps
-        self.is_sdxl = getattr(model, 'is_sdxl', False)
+        self.is_sdxl = model.is_sdxl
         self.added_cond_kwargs = None
         self.added_cond_kwargs_single = None
         self.pooled_context = None
@@ -616,40 +614,43 @@ class DirectInversion:
 
     @torch.no_grad()
     def ddim_inversion(self, image):
-        latent = image2latent(self.model, image, is_sdxl=self.is_sdxl)
-        image_rec = latent2image(self.model, latent, is_sdxl=self.is_sdxl)[0]
+        latent = image2latent(self.model, image)
+        image_rec = latent2image(self.model, latent)[0]
         ddim_latents = self.ddim_loop(latent)
         return image_rec, ddim_latents
     
     @torch.no_grad()
     def ddim_null_inversion(self, image):
-        latent = image2latent(self.model, image, is_sdxl=self.is_sdxl)
-        image_rec = latent2image(self.model, latent, is_sdxl=self.is_sdxl)[0]
+        latent = image2latent(self.model, image)
+        image_rec = latent2image(self.model, latent)[0]
         ddim_latents = self.ddim_null_loop(latent)
         return image_rec, ddim_latents
     
     @torch.no_grad()
     def ddim_with_guidance_scale_inversion(self, image,guidance_scale):
-        latent = image2latent(self.model, image, is_sdxl=self.is_sdxl)
-        image_rec = latent2image(self.model, latent, is_sdxl=self.is_sdxl)[0]
+        latent = image2latent(self.model, image)
+        image_rec = latent2image(self.model, latent)[0]
         ddim_latents = self.ddim_with_guidance_scale_loop(latent,guidance_scale)
         return image_rec, ddim_latents
 
     def offset_calculate(self, latents, num_inner_steps, epsilon, guidance_scale):
+        # Ensure dtype consistency
+        model_dtype = next(self.model.unet.parameters()).dtype
         noise_loss_list = []
-        latent_cur = torch.concat([latents[-1]]*(self.context.shape[0]//2))
+        latent_cur = torch.concat([latents[-1]]*(self.context.shape[0]//2)).to(dtype=model_dtype)
         for i in range(self.num_ddim_steps):            
-            latent_prev = torch.concat([latents[len(latents) - i - 2]]*latent_cur.shape[0])
+            latent_prev = torch.concat([latents[len(latents) - i - 2]]*latent_cur.shape[0]).to(dtype=model_dtype)
             t = self.model.scheduler.timesteps[i]
             with torch.no_grad():
                 noise_pred = self.get_noise_pred_single(torch.concat([latent_cur]*2), t, self.context)
                 noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2)
                 noise_pred_w_guidance = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
                 latents_prev_rec, _ = self.prev_step(noise_pred_w_guidance, t, latent_cur)
+                latents_prev_rec = latents_prev_rec.to(dtype=model_dtype)
                 loss = latent_prev - latents_prev_rec
                 
-            noise_loss_list.append(loss.detach())
-            latent_cur = latents_prev_rec + loss
+            noise_loss_list.append(loss.detach().to(dtype=model_dtype))
+            latent_cur = (latents_prev_rec + loss).to(dtype=model_dtype)
             
         return noise_loss_list
     
@@ -798,7 +799,7 @@ class DirectInversion:
         self.prompt = None
         self.context = None
         self.num_ddim_steps = num_ddim_steps
-        self.is_sdxl = getattr(model, 'is_sdxl', False)
+        self.is_sdxl = model.is_sdxl
         self.added_cond_kwargs = None
         self.added_cond_kwargs_single = None
         self.pooled_context = None

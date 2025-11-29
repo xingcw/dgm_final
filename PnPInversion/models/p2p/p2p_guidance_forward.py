@@ -5,38 +5,31 @@ from models.p2p.inversion import encode_prompt_sdxl, get_sdxl_unet_kwargs
 from utils.utils import init_latent
 
 
+def get_model_dtype(model):
+    """Get the dtype of the model (typically from unet)."""
+    if hasattr(model, 'dtype'):
+        return model.dtype
+    elif hasattr(model, 'unet'):
+        return next(model.unet.parameters()).dtype
+    else:
+        return torch.float32
+
+
 def get_model_image_size(model):
     """Get the appropriate image size based on model type."""
-    is_sdxl = getattr(model, 'is_sdxl', False)
-    
-    if is_sdxl:
+    sample_size = getattr(getattr(model.unet, "config", None), "sample_size", None)
+    if sample_size == 128:  # SDXL uses 128x128
         return 1024
-    
-    # Check for SD 2.1 by looking at model config or VAE sample size
-    try:
-        # SD 2.1 uses 768x768
-        if hasattr(model, 'vae') and hasattr(model.vae.config, 'sample_size'):
-            vae_sample_size = model.vae.config.sample_size
-            if vae_sample_size == 96:  # 768/8 = 96
-                return 768
-        # Also check unet sample size
-        if hasattr(model, 'unet') and hasattr(model.unet.config, 'sample_size'):
-            unet_sample_size = model.unet.config.sample_size
-            if unet_sample_size == 96:  # 768/8 = 96
-                return 768
-    except:
-        pass
-    
-    # Default to SD 1.5 size
-    return 512
+    elif sample_size == 96:  # SD 2.1 uses 96x96
+        return 768
+    elif sample_size == 64:  # SD 1.5 uses 64x64
+        return 512
+    else:
+        raise ValueError(f"Unsupported sample size: {sample_size}")
 
 
-def p2p_guidance_diffusion_step(model, controller, latents, context, t, guidance_scale, 
-                                 low_resource=False, added_cond_kwargs=None):
-    is_sdxl = getattr(model, 'is_sdxl', False)
-    
-    # Ensure proper dtype - get model dtype
-    model_dtype = next(model.unet.parameters()).dtype
+def p2p_guidance_diffusion_step(model, controller, latents, context, t, guidance_scale, low_resource=False, is_sdxl=False, added_cond_kwargs=None):
+    model_dtype = get_model_dtype(model)
     latents = latents.to(dtype=model_dtype)
     context = context.to(dtype=model_dtype)
     
@@ -63,7 +56,6 @@ def p2p_guidance_diffusion_step(model, controller, latents, context, t, guidance
     return latents
 
 
-
 @torch.no_grad()
 def p2p_guidance_forward(
     model,
@@ -73,14 +65,15 @@ def p2p_guidance_forward(
     guidance_scale = 7.5,
     generator = None,
     latent = None,
-    uncond_embeddings=None
+    uncond_embeddings=None,
+    is_sdxl=False
 ):
     batch_size = len(prompt)
     register_attention_control(model, controller)
-    is_sdxl = getattr(model, 'is_sdxl', False)
     height = width = get_model_image_size(model)
     
     added_cond_kwargs = None
+    model_dtype = get_model_dtype(model)
     
     if is_sdxl:
         # SDXL: Use dual text encoders
@@ -120,6 +113,7 @@ def p2p_guidance_forward(
             uncond_embeddings_ = None
 
     latent, latents = init_latent(latent, model, height, width, generator, batch_size)
+    latents = latents.to(dtype=model_dtype)
     model.scheduler.set_timesteps(num_inference_steps)
     for i, t in enumerate(model.scheduler.timesteps):
         if uncond_embeddings_ is None:
@@ -127,7 +121,7 @@ def p2p_guidance_forward(
         else:
             context = torch.cat([uncond_embeddings_, text_embeddings])
         latents = p2p_guidance_diffusion_step(model, controller, latents, context, t, guidance_scale, 
-                                               low_resource=False, added_cond_kwargs=added_cond_kwargs)
+                                               low_resource=False, is_sdxl=is_sdxl, added_cond_kwargs=added_cond_kwargs)
         
     return latents, latent
 
@@ -140,22 +134,26 @@ def p2p_guidance_forward_single_branch(
     guidance_scale = 7.5,
     generator = None,
     latent = None,
-    uncond_embeddings=None
+    uncond_embeddings=None,
+    is_sdxl=False
 ):
     batch_size = len(prompt)
     register_attention_control(model, controller)
-    is_sdxl = getattr(model, 'is_sdxl', False)
     height = width = get_model_image_size(model)
     
     added_cond_kwargs = None
+    model_dtype = get_model_dtype(model)
     
     if is_sdxl:
+        # SDXL: Use dual text encoders
         text_embeddings, pooled_text_embeds = encode_prompt_sdxl(model, prompt, model.device)
         uncond_embeddings_, pooled_uncond_embeds = encode_prompt_sdxl(model, [""] * batch_size, model.device)
         
-        combined_pooled = torch.cat([pooled_uncond_embeds, pooled_text_embeds])
+        combined_pooled = torch.cat([pooled_uncond_embeds, pooled_text_embeds]).to(
+            device=model.device, dtype=text_embeddings.dtype
+        )
         added_cond_kwargs = get_sdxl_unet_kwargs(
-            model, None, combined_pooled, 
+            model, None, combined_pooled,
             2 * batch_size, model.device, dtype=text_embeddings.dtype
         )
     else:
@@ -175,24 +173,25 @@ def p2p_guidance_forward_single_branch(
         uncond_embeddings_ = model.text_encoder(uncond_input.input_ids.to(model.device))[0]
 
     latent, latents = init_latent(latent, model, height, width, generator, batch_size)
+    latents = latents.to(dtype=model_dtype)
     model.scheduler.set_timesteps(num_inference_steps)
     for i, t in enumerate(model.scheduler.timesteps):
-        context = torch.cat([torch.cat([uncond_embeddings[i],uncond_embeddings_[1:]]), text_embeddings])
+        if is_sdxl:
+            context = torch.cat([uncond_embeddings_, text_embeddings])
+        else:
+            context = torch.cat([torch.cat([uncond_embeddings[i],uncond_embeddings_[1:]]), text_embeddings])
+        context = context.to(dtype=model_dtype)
         latents = p2p_guidance_diffusion_step(model, controller, latents, context, t, guidance_scale, 
-                                               low_resource=False, added_cond_kwargs=added_cond_kwargs)
+                                               low_resource=False, is_sdxl=is_sdxl, added_cond_kwargs=added_cond_kwargs)
         
     return latents, latent
 
 
-def direct_inversion_p2p_guidance_diffusion_step(model, controller, latents, context, t, guidance_scale, 
-                                                  noise_loss, low_resource=False, add_offset=True,
-                                                  added_cond_kwargs=None):
-    is_sdxl = getattr(model, 'is_sdxl', False)
-    
-    # Ensure proper dtype - get model dtype
-    model_dtype = next(model.unet.parameters()).dtype
+def direct_inversion_p2p_guidance_diffusion_step(model, controller, latents, context, t, guidance_scale, noise_loss, low_resource=False, add_offset=True, is_sdxl=False, added_cond_kwargs=None):
+    model_dtype = get_model_dtype(model)
     latents = latents.to(dtype=model_dtype)
     context = context.to(dtype=model_dtype)
+    noise_loss = noise_loss.to(dtype=model_dtype)
     
     if low_resource:
         if is_sdxl:
@@ -213,22 +212,20 @@ def direct_inversion_p2p_guidance_diffusion_step(model, controller, latents, con
         noise_pred_uncond, noise_prediction_text = noise_pred.chunk(2)
     noise_pred = noise_pred_uncond + guidance_scale * (noise_prediction_text - noise_pred_uncond)
     latents = model.scheduler.step(noise_pred, t, latents)["prev_sample"]
+    latents = latents.to(dtype=model_dtype)
     if add_offset:
-        noise_loss = noise_loss.to(dtype=model_dtype)
+        # Apply offset correction only to source prompt (first in batch)
+        # This corrects the inversion trajectory for source while target follows clean denoising path
         latents = torch.concat((latents[:1]+noise_loss[:1],latents[1:]))
     latents = controller.step_callback(latents)
     return latents
 
 
-def direct_inversion_p2p_guidance_diffusion_step_add_target(model, controller, latents, context, t, guidance_scale, 
-                                                            noise_loss, low_resource=False, add_offset=True,
-                                                            added_cond_kwargs=None):
-    is_sdxl = getattr(model, 'is_sdxl', False)
-    
-    # Ensure proper dtype - get model dtype
-    model_dtype = next(model.unet.parameters()).dtype
+def direct_inversion_p2p_guidance_diffusion_step_add_target(model, controller, latents, context, t, guidance_scale, noise_loss, low_resource=False, add_offset=True, is_sdxl=False, added_cond_kwargs=None):
+    model_dtype = get_model_dtype(model)
     latents = latents.to(dtype=model_dtype)
     context = context.to(dtype=model_dtype)
+    noise_loss = noise_loss.to(dtype=model_dtype)
     
     if low_resource:
         if is_sdxl:
@@ -249,8 +246,9 @@ def direct_inversion_p2p_guidance_diffusion_step_add_target(model, controller, l
         noise_pred_uncond, noise_prediction_text = noise_pred.chunk(2)
     noise_pred = noise_pred_uncond + guidance_scale * (noise_prediction_text - noise_pred_uncond)
     latents = model.scheduler.step(noise_pred, t, latents)["prev_sample"]
+    latents = latents.to(dtype=model_dtype)
     if add_offset:
-        noise_loss = noise_loss.to(dtype=model_dtype)
+        # Apply offset correction to all prompts in batch (for ablation studies)
         latents = torch.concat((latents[:1]+noise_loss[:1],latents[1:]+noise_loss[1:]))
     latents = controller.step_callback(latents)
     return latents
@@ -266,22 +264,26 @@ def direct_inversion_p2p_guidance_forward(
     guidance_scale = 7.5,
     generator = None,
     noise_loss_list = None,
-    add_offset=True
+    add_offset=True,
+    is_sdxl=False
 ):
     batch_size = len(prompt)
     register_attention_control(model, controller)
-    is_sdxl = getattr(model, 'is_sdxl', False)
     height = width = get_model_image_size(model)
     
     added_cond_kwargs = None
+    model_dtype = get_model_dtype(model)
     
     if is_sdxl:
+        # SDXL: Use dual text encoders
         text_embeddings, pooled_text_embeds = encode_prompt_sdxl(model, prompt, model.device)
         uncond_embeddings, pooled_uncond_embeds = encode_prompt_sdxl(model, [""] * batch_size, model.device)
         
-        combined_pooled = torch.cat([pooled_uncond_embeds, pooled_text_embeds])
+        combined_pooled = torch.cat([pooled_uncond_embeds, pooled_text_embeds]).to(
+            device=model.device, dtype=text_embeddings.dtype
+        )
         added_cond_kwargs = get_sdxl_unet_kwargs(
-            model, None, combined_pooled, 
+            model, None, combined_pooled,
             2 * batch_size, model.device, dtype=text_embeddings.dtype
         )
     else:
@@ -301,13 +303,13 @@ def direct_inversion_p2p_guidance_forward(
         uncond_embeddings = model.text_encoder(uncond_input.input_ids.to(model.device))[0]
 
     latent, latents = init_latent(latent, model, height, width, generator, batch_size)
+    latents = latents.to(dtype=model_dtype)
     model.scheduler.set_timesteps(num_inference_steps)
     for i, t in enumerate(model.scheduler.timesteps):
-        
-        context = torch.cat([uncond_embeddings, text_embeddings])
+        context = torch.cat([uncond_embeddings, text_embeddings]).to(dtype=model_dtype)
         latents = direct_inversion_p2p_guidance_diffusion_step(model, controller, latents, context, t, guidance_scale, 
                                                                 noise_loss_list[i], low_resource=False, add_offset=add_offset,
-                                                                added_cond_kwargs=added_cond_kwargs)
+                                                                is_sdxl=is_sdxl, added_cond_kwargs=added_cond_kwargs)
         
     return latents, latent
 
@@ -321,22 +323,26 @@ def direct_inversion_p2p_guidance_forward_add_target(
     guidance_scale = 7.5,
     generator = None,
     noise_loss_list = None,
-    add_offset=True
+    add_offset=True,
+    is_sdxl=False
 ):
     batch_size = len(prompt)
     register_attention_control(model, controller)
-    is_sdxl = getattr(model, 'is_sdxl', False)
     height = width = get_model_image_size(model)
     
     added_cond_kwargs = None
+    model_dtype = get_model_dtype(model)
     
     if is_sdxl:
+        # SDXL: Use dual text encoders
         text_embeddings, pooled_text_embeds = encode_prompt_sdxl(model, prompt, model.device)
         uncond_embeddings, pooled_uncond_embeds = encode_prompt_sdxl(model, [""] * batch_size, model.device)
         
-        combined_pooled = torch.cat([pooled_uncond_embeds, pooled_text_embeds])
+        combined_pooled = torch.cat([pooled_uncond_embeds, pooled_text_embeds]).to(
+            device=model.device, dtype=text_embeddings.dtype
+        )
         added_cond_kwargs = get_sdxl_unet_kwargs(
-            model, None, combined_pooled, 
+            model, None, combined_pooled,
             2 * batch_size, model.device, dtype=text_embeddings.dtype
         )
     else:
@@ -356,12 +362,12 @@ def direct_inversion_p2p_guidance_forward_add_target(
         uncond_embeddings = model.text_encoder(uncond_input.input_ids.to(model.device))[0]
 
     latent, latents = init_latent(latent, model, height, width, generator, batch_size)
+    latents = latents.to(dtype=model_dtype)
     model.scheduler.set_timesteps(num_inference_steps)
     for i, t in enumerate(model.scheduler.timesteps):
-        
-        context = torch.cat([uncond_embeddings, text_embeddings])
+        context = torch.cat([uncond_embeddings, text_embeddings]).to(dtype=model_dtype)
         latents = direct_inversion_p2p_guidance_diffusion_step_add_target(model, controller, latents, context, t, guidance_scale, 
                                                                            noise_loss_list[i], low_resource=False, add_offset=add_offset,
-                                                                           added_cond_kwargs=added_cond_kwargs)
+                                                                           is_sdxl=is_sdxl, added_cond_kwargs=added_cond_kwargs)
         
     return latents, latent

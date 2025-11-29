@@ -34,8 +34,7 @@ def register_attention_control(model, controller):
         if isinstance(to_out, torch.nn.modules.container.ModuleList):
             to_out = to_out[0]
 
-        def forward(x, encoder_hidden_states=None, attention_mask=None,
-                    context=None, mask=None, **kwargs):
+        def forward(x, encoder_hidden_states=None, attention_mask=None, context=None, mask=None, **kwargs):
             # Handle diffusers API: encoder_hidden_states takes precedence
             if encoder_hidden_states is not None:
                 context = encoder_hidden_states

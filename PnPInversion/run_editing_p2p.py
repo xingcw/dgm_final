@@ -126,9 +126,9 @@ if __name__ == "__main__":
                                          image_path=image_path,
                                         prompt_src=original_prompt,
                                         prompt_tar=editing_prompt,
-                                        guidance_scale=7.5,
-                                        cross_replace_steps=0.4,
-                                        self_replace_steps=0.6,
+                                        guidance_scale=5.0,
+                                        cross_replace_steps=0.4,  # Lower = better background preservation
+                                        self_replace_steps=0.6,  # Lower = better background preservation
                                         blend_word=(((blended_word[0], ),
                                                     (blended_word[1], ))) if len(blended_word) else None,
                                         eq_params={
@@ -140,6 +140,7 @@ if __name__ == "__main__":
                                         use_inversion_guidance=True,
                                         recon_lr=1,
                                         recon_t=400,
+                                        blend_threshold=0.5,  # Higher = stricter mask = better background preservation (0.3-0.7 range)
                                         )
                 if not os.path.exists(os.path.dirname(present_image_save_path)):
                     os.makedirs(os.path.dirname(present_image_save_path))

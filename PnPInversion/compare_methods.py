@@ -74,18 +74,41 @@ METRIC_INFO = {
 def load_and_extract(csv_path, method_name=None):
     """Load CSV and extract metrics for a specific method or all methods."""
     df = pd.read_csv(csv_path)
-    print(df.columns)
-    print(df.head())
     
     # Extract metrics for this method
     metrics_data = {'file_id': df['file_id']}
     
     for col in df.columns:
         if '|' in col:
-            metric_name = col.split('|')[1]
+            method_part, metric_name = col.split('|', 1)
+            # If method_name is specified, only include columns matching that method
+            if method_name is not None:
+                # Handle both formats: "1_directinversion+p2p" and "sdxl_directinversion+p2p"
+                # Extract the base method name (after first underscore or use full name)
+                method_base = method_name.split('_', 1)[-1] if '_' in method_name else method_name
+                method_part_base = method_part.split('_', 1)[-1] if '_' in method_part else method_part
+                
+                # Match if: exact match, or base names match, or method_part ends with method_base
+                if (method_part == method_name or 
+                    method_part_base == method_base or 
+                    method_part.endswith(method_base) or
+                    method_name.endswith(method_part_base)):
+                    metrics_data[metric_name] = df[col]
+            else:
+                metrics_data[metric_name] = df[col]
+        elif col == 'file_id':
+            continue
         else:
-            metric_name = col
-        metrics_data[metric_name] = df[col]
+            # Column without method prefix
+            if method_name is None:
+                metrics_data[col] = df[col]
+    
+    # Use method_name from CSV if not provided
+    if method_name is None and len(df.columns) > 1:
+        # Try to extract method name from first metric column
+        first_col = [c for c in df.columns if c != 'file_id'][0]
+        if '|' in first_col:
+            method_name = first_col.split('|')[0]
     
     return pd.DataFrame(metrics_data), method_name
 
@@ -255,6 +278,53 @@ def compare_two_methods(df1, df2, label1, label2, common_metrics):
     return results, summary_table, merged
 
 
+def print_single_method_statistics(df, method_name, output=None):
+    """Print statistics for a single method."""
+    import sys
+    from io import StringIO
+    
+    old_stdout = sys.stdout
+    if output:
+        sys.stdout = StringIO()
+    
+    metrics = [col for col in df.columns if col != 'file_id']
+    
+    print("=" * 80)
+    print(f"STATISTICS FOR METHOD: {method_name}")
+    print("=" * 80)
+    print(f"Total samples: {len(df)}")
+    print()
+    
+    # Create statistics table
+    stats_table = []
+    for metric in metrics:
+        stats = compute_statistics(df[metric])
+        higher_is_better = METRIC_INFO.get(metric, (True, ""))[0]
+        direction = "↑" if higher_is_better else "↓"
+        
+        stats_table.append([
+            metric,
+            f"{stats['mean']:.4f} ± {stats['std']:.4f}",
+            f"{stats['median']:.4f}",
+            f"[{stats['min']:.4f}, {stats['max']:.4f}]",
+            stats['n'],
+            direction
+        ])
+    
+    headers = ["Metric", "Mean ± Std", "Median", "Range", "N", "Dir"]
+    print(tabulate(stats_table, headers=headers, tablefmt="grid"))
+    
+    if output:
+        output_str = sys.stdout.getvalue()
+        sys.stdout = old_stdout
+        with open(output, 'w') as f:
+            f.write(output_str)
+        print(f"\nResults saved to: {output}")
+        print(output_str)
+    else:
+        sys.stdout = old_stdout
+
+
 def compare_methods(csv1=None, csv2=None, method1=None, method2=None, csvs=None, output=None, latex_output=None):
     """
     Main comparison function.
@@ -262,11 +332,20 @@ def compare_methods(csv1=None, csv2=None, method1=None, method2=None, csvs=None,
     If csvs is provided: compare all pairs of files in csvs list
     If csv2 is provided: compare same method across two files
     If method2 is provided: compare two methods within csv1
+    If only method1 is provided: print statistics for single method
     """
     
     # Handle multiple CSV files
     if csvs is not None and len(csvs) >= 2:
         return compare_multiple_methods(csvs, output, latex_output)
+    
+    # Handle single method statistics
+    if csv1 is not None and csv2 is None and method2 is None and method1 is not None:
+        df, name = load_and_extract(csv1, method1)
+        if len(df.columns) <= 1:  # Only file_id
+            raise ValueError(f"Method '{method1}' not found in CSV file")
+        print_single_method_statistics(df, method1 or name, output)
+        return None
     
     # Handle legacy two-file comparison
     if csv2 is None and method2 is None:
@@ -1086,12 +1165,17 @@ def main():
         # Multiple files mode
         compare_methods(csvs=args.csvs, output=args.output, latex_output=args.latex)
     elif args.csv1 is not None:
-        # Legacy two-file mode
-        if args.csv2 is None and args.method2 is None:
-            parser.error("Must provide either --csv2 or --method2 for comparison")
-        compare_methods(args.csv1, args.csv2, args.method1, args.method2, output=args.output)
+        # Single method mode (if only method1 provided) or two-file comparison mode
+        if args.csv2 is None and args.method2 is None and args.method1 is not None:
+            # Single method statistics mode
+            compare_methods(args.csv1, None, args.method1, None, output=args.output)
+        elif args.csv2 is None and args.method2 is None:
+            parser.error("Must provide either --csv2, --method2, or --method1 for single method statistics")
+        else:
+            # Two-file comparison mode
+            compare_methods(args.csv1, args.csv2, args.method1, args.method2, output=args.output)
     else:
-        parser.error("Must provide either --csvs (for multiple files) or --csv1 (for two files)")
+        parser.error("Must provide either --csvs (for multiple files) or --csv1 (for single/two files)")
 
 
 if __name__ == "__main__":

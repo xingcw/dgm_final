@@ -9,7 +9,9 @@ from utils.utils import load_512, load_768, load_1024, latent2image, txt_draw, r
 from PIL import Image
 import numpy as np
 import torch
+import logging
 
+logging.getLogger().setLevel(logging.WARNING)
 
 class P2PEditor:
     def __init__(self, method_list, device, num_ddim_steps=50, model_type="sdxl", low_memory=False) -> None:
@@ -134,7 +136,29 @@ class P2PEditor:
                 eq_params=None,
                 is_replace_controller=False,
                 use_inversion_guidance=False,
-                dilate_mask=1,):
+                dilate_mask=1,
+                blend_threshold=0.5,):
+        logging.info("--------------------------------")
+        logging.info(f"[Editor] edit method: {edit_method}")
+        logging.info(f"[Editor] image path: {image_path}")
+        logging.info(f"[Editor] prompt src: {prompt_src}")
+        logging.info(f"[Editor] prompt tar: {prompt_tar}")
+        logging.info(f"[Editor] guidance scale: {guidance_scale}")
+        logging.info(f"[Editor] proximal: {proximal}")
+        logging.info(f"[Editor] quantile: {quantile}")
+        logging.info(f"[Editor] use reconstruction guidance: {use_reconstruction_guidance}")
+        logging.info(f"[Editor] recon t: {recon_t}")
+        logging.info(f"[Editor] recon lr: {recon_lr}")
+        logging.info(f"[Editor] cross replace steps: {cross_replace_steps}")
+        logging.info(f"[Editor] self replace steps: {self_replace_steps}")
+        logging.info(f"[Editor] blend word: {blend_word}")
+        logging.info(f"[Editor] eq params: {eq_params}")
+        logging.info(f"[Editor] is replace controller: {is_replace_controller}")
+        logging.info(f"[Editor] use inversion guidance: {use_inversion_guidance}")
+        logging.info(f"[Editor] dilate mask: {dilate_mask}")
+        logging.info(f"[Editor] blend threshold: {blend_threshold}")
+        logging.info("--------------------------------")
+
         if edit_method=="ddim+p2p":
             return self.edit_image_ddim(image_path, prompt_src, prompt_tar, guidance_scale=guidance_scale, 
                                         cross_replace_steps=cross_replace_steps, self_replace_steps=self_replace_steps, 
@@ -157,7 +181,8 @@ class P2PEditor:
         elif edit_method=="directinversion+p2p":
             return self.edit_image_directinversion(image_path=image_path, prompt_src=prompt_src, prompt_tar=prompt_tar, guidance_scale=guidance_scale, 
                                         cross_replace_steps=cross_replace_steps, self_replace_steps=self_replace_steps, 
-                                        blend_word=blend_word, eq_params=eq_params, is_replace_controller=is_replace_controller)
+                                        blend_word=blend_word, eq_params=eq_params, is_replace_controller=is_replace_controller,
+                                        blend_threshold=blend_threshold)
         elif edit_method in ["directinversion+p2p_guidance_0_1", "directinversion+p2p_guidance_0_5","directinversion+p2p_guidance_0_25", \
             "directinversion+p2p_guidance_0_75", "directinversion+p2p_guidance_1_1", "directinversion+p2p_guidance_1_5", "directinversion+p2p_guidance_1_25", \
                 "directinversion+p2p_guidance_1_75", "directinversion+p2p_guidance_25_1", "directinversion+p2p_guidance_25_5", "directinversion+p2p_guidance_25_25", \
@@ -539,6 +564,7 @@ class P2PEditor:
         blend_word=None,
         eq_params=None,
         is_replace_controller=False,
+        blend_threshold=0.3,
     ):
         image_gt = self.load_image(image_path)
         prompts = [prompt_src, prompt_tar]
@@ -579,7 +605,8 @@ class P2PEditor:
                                     num_ddim_steps=self.num_ddim_steps,
                                     device=self.device,
                                     is_sdxl=self.use_sdxl,
-                                    image_size=self.image_size)
+                                    image_size=self.image_size,
+                                    blend_threshold=blend_threshold)
         
         latents, _ = direct_inversion_p2p_guidance_forward(model=self.ldm_stable, 
                                        prompt=prompts, 

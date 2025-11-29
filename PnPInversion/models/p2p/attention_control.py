@@ -582,12 +582,14 @@ def make_controller(pipeline,
                     num_ddim_steps=50,
                     device="cuda",
                     image_size=512,
-                    is_sdxl=False) -> AttentionControlEdit:
+                    is_sdxl=False,
+                    blend_threshold=0.3) -> AttentionControlEdit:
     if blend_words is None:
         lb = None
     else:
         lb = LocalBlend(prompts, blend_words, tokenizer=pipeline.tokenizer, device=device, 
-                        num_ddim_steps=num_ddim_steps, image_size=image_size, is_sdxl=is_sdxl)
+                        num_ddim_steps=num_ddim_steps, image_size=image_size, is_sdxl=is_sdxl,
+                        th=(blend_threshold, blend_threshold))
     if is_replace_controller:
         controller = AttentionReplace(prompts, 
                                       num_ddim_steps, 

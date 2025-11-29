@@ -350,8 +350,105 @@ def compare_methods(csv1, csv2=None, method1=None, method2=None, output=None):
     return results
 
 
+def summarize_single_csv(csv_path, output=None):
+    """Summarize metrics from a single CSV file (no comparison)."""
+    df = pd.read_csv(csv_path)
+    
+    print("=" * 80)
+    print(f"METRIC SUMMARY: {csv_path}")
+    print("=" * 80)
+    print(f"Total samples: {len(df)}")
+    print()
+    
+    # Extract method names and metrics
+    methods = set()
+    metrics = set()
+    for col in df.columns:
+        if col == 'file_id':
+            continue
+        if '|' in col:
+            method, metric = col.split('|', 1)
+            methods.add(method)
+            metrics.add(metric)
+        else:
+            metrics.add(col)
+    
+    output_lines = []
+    output_lines.append("=" * 80)
+    output_lines.append(f"METRIC SUMMARY: {csv_path}")
+    output_lines.append("=" * 80)
+    output_lines.append(f"Total samples: {len(df)}")
+    output_lines.append("")
+    
+    for method in sorted(methods) if methods else [None]:
+        print(f"\n{'=' * 80}")
+        if method:
+            print(f"METHOD: {method}")
+        print("=" * 80)
+        
+        output_lines.append("=" * 80)
+        if method:
+            output_lines.append(f"METHOD: {method}")
+        output_lines.append("=" * 80)
+        output_lines.append("")
+        
+        # Build header
+        header = f"{'Metric':<45} | {'Mean':>12} | {'Std':>12} | {'Median':>12} | {'Min':>12} | {'Max':>12} | {'N':>6}"
+        print(header)
+        print("-" * len(header))
+        output_lines.append(header)
+        output_lines.append("-" * len(header))
+        
+        for metric in sorted(metrics):
+            if method:
+                col_name = f"{method}|{metric}"
+            else:
+                col_name = metric
+            
+            if col_name not in df.columns:
+                continue
+            
+            values = pd.to_numeric(df[col_name], errors='coerce').dropna()
+            
+            if len(values) == 0:
+                line = f"{metric:<45} | {'N/A':>12} | {'N/A':>12} | {'N/A':>12} | {'N/A':>12} | {'N/A':>12} | {0:>6}"
+                print(line)
+                output_lines.append(line)
+                continue
+            
+            mean_val = values.mean()
+            std_val = values.std()
+            median_val = values.median()
+            min_val = values.min()
+            max_val = values.max()
+            n = len(values)
+            
+            # Get direction indicator
+            higher_is_better = METRIC_INFO.get(metric, (True, ""))[0]
+            direction = "↑" if higher_is_better else "↓"
+            
+            line = f"{metric + ' ' + direction:<45} | {mean_val:>12.4f} | {std_val:>12.4f} | {median_val:>12.4f} | {min_val:>12.4f} | {max_val:>12.4f} | {n:>6}"
+            print(line)
+            output_lines.append(line)
+    
+    print()
+    print("=" * 80)
+    print("LEGEND: ↑ = Higher is better, ↓ = Lower is better")
+    print("=" * 80)
+    
+    output_lines.append("")
+    output_lines.append("=" * 80)
+    output_lines.append("LEGEND: ↑ = Higher is better, ↓ = Lower is better")
+    output_lines.append("=" * 80)
+    
+    if output:
+        with open(output, 'w') as f:
+            f.write('\n'.join(output_lines))
+        print(f"\nResults saved to: {output}")
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Compare two image editing methods statistically")
+    parser = argparse.ArgumentParser(description="Compare two image editing methods statistically, or summarize a single CSV")
     parser.add_argument('--csv1', type=str, required=True, 
                         help="Path to first CSV file with evaluation results")
     parser.add_argument('--csv2', type=str, default=None,
@@ -361,14 +458,15 @@ def main():
     parser.add_argument('--method2', type=str, default=None,
                         help="Name of second method (for comparing methods within same file)")
     parser.add_argument('--output', type=str, default=None,
-                        help="Path to save comparison results")
+                        help="Path to save comparison/summary results")
     
     args = parser.parse_args()
     
     if args.csv2 is None and args.method2 is None:
-        parser.error("Must provide either --csv2 or --method2 for comparison")
-    
-    compare_methods(args.csv1, args.csv2, args.method1, args.method2, args.output)
+        # No comparison - just summarize the single CSV
+        summarize_single_csv(args.csv1, args.output)
+    else:
+        compare_methods(args.csv1, args.csv2, args.method1, args.method2, args.output)
 
 
 if __name__ == "__main__":

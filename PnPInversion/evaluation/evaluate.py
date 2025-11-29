@@ -106,6 +106,7 @@ all_tgt_image_folders={
     "1_negative-prompt-inversion+p2p":"output/negative-prompt-inversion+p2p/annotation_images",
     "1_stylediffusion+p2p":"output/stylediffusion+p2p/annotation_images",
     "1_directinversion+p2p":"output/directinversion+p2p/annotation_images",
+    "1_directinversion+controlnet+p2p":"output/sd15/sam+controlnet+p2p/annotation_images",
     # ---
     "1_ddim+masactrl":"output/ddim+masactrl/annotation_images",
     "1_directinversion+masactrl":"output/directinversion+masactrl/annotation_images",
@@ -233,6 +234,9 @@ if __name__=="__main__":
                 tgt_image_folders[key]=custom_tgt_image_folders[i]
     
     result_path=args.result_path
+    
+    # Create results directory if it doesn't exist
+    os.makedirs(os.path.dirname(result_path), exist_ok=True)
     
     metrics_calculator=MetricsCalculator(args.device)
     

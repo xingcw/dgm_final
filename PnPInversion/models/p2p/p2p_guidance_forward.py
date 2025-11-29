@@ -101,17 +101,18 @@ def p2p_guidance_forward_single_branch(
     return latents, latent
 
 
-def direct_inversion_p2p_guidance_diffusion_step(model, controller, latents, context, t, guidance_scale, noise_loss, low_resource=False,add_offset=True, controlnet_conditioning_image=None, controlnet_conditioning_scale=1.0):
-    # Use the passed controlnet_conditioning_scale parameter
+def direct_inversion_p2p_guidance_diffusion_step(model, controller, latents, context, t, guidance_scale, noise_loss, low_resource=False,add_offset=True):
+    # Only pass ControlNet parameters if actually using ControlNet
     if low_resource:
-        noise_pred_uncond = model.unet(latents, t, encoder_hidden_states=context[0], image=controlnet_conditioning_image, controlnet_conditioning_scale=controlnet_conditioning_scale)["sample"]
-        noise_prediction_text = model.unet(latents, t, encoder_hidden_states=context[1], image=controlnet_conditioning_image, controlnet_conditioning_scale=controlnet_conditioning_scale)["sample"]
+        noise_pred_uncond = model.unet(latents, t, encoder_hidden_states=context[0])["sample"]
+        noise_prediction_text = model.unet(latents, t, encoder_hidden_states=context[1])["sample"]
     else:
         latents_input = torch.cat([latents] * 2)
-        noise_pred = model.unet(latents_input, t, encoder_hidden_states=context, image=controlnet_conditioning_image, controlnet_conditioning_scale=controlnet_conditioning_scale)["sample"]
+        noise_pred = model.unet(latents_input, t, encoder_hidden_states=context)["sample"]
         noise_pred_uncond, noise_prediction_text = noise_pred.chunk(2)
+
     noise_pred = noise_pred_uncond + guidance_scale * (noise_prediction_text - noise_pred_uncond)
-    latents = model.scheduler.step(noise_pred, t, latents, image=controlnet_conditioning_image, controlnet_conditioning_scale=controlnet_conditioning_scale)["prev_sample"]
+    latents = model.scheduler.step(noise_pred, t, latents)["prev_sample"]
     if add_offset:
         latents = torch.concat((latents[:1]+noise_loss[:1],latents[1:]))
     latents = controller.step_callback(latents)
@@ -144,9 +145,7 @@ def direct_inversion_p2p_guidance_forward(
     guidance_scale = 7.5,
     generator = None,
     noise_loss_list = None,
-    add_offset=True, 
-    controlnet_conditioning_image=None,
-    controlnet_conditioning_scale=1.0
+    add_offset=True
 ):
     batch_size = len(prompt)
     register_attention_control(model, controller)
@@ -172,7 +171,7 @@ def direct_inversion_p2p_guidance_forward(
     for i, t in enumerate(model.scheduler.timesteps):
         
         context = torch.cat([uncond_embeddings, text_embeddings])
-        latents = direct_inversion_p2p_guidance_diffusion_step(model, controller, latents, context, t, guidance_scale, noise_loss_list[i],low_resource=False,add_offset=add_offset, controlnet_conditioning_image=controlnet_conditioning_image, controlnet_conditioning_scale=controlnet_conditioning_scale)
+        latents = direct_inversion_p2p_guidance_diffusion_step(model, controller, latents, context, t, guidance_scale, noise_loss_list[i],low_resource=False,add_offset=add_offset)
         
     return latents, latent
 

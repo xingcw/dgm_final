@@ -1,8 +1,11 @@
-"""Pose-constrained editing with ControlNet and Prompt-to-Prompt (p2p).
+"""Structure-constrained editing with ControlNet and Prompt-to-Prompt (p2p).
 
-This script combines ControlNet with OpenPose condition and p2p editing to maintain
-structural consistency during editing. It uses the `controlnet_aux` OpenposeDetector 
-to extract poses from the input image and combines ControlNet with p2p editing.
+This script combines ControlNet with various conditioning methods (Canny edges or SAM segmentation)
+and p2p editing to maintain structural consistency during editing. 
+
+Conditioning modes:
+- Canny: Uses multi-level Canny edge detection with ControlNet canny model
+- SAM: Uses Segment Anything Model with ControlNet segmentation model
 """
 
 from __future__ import annotations
@@ -51,7 +54,7 @@ def setup_seed(seed=1234):
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Edit images while preserving pose with ControlNet OpenPose")
+    parser = argparse.ArgumentParser(description="Edit images while preserving structure with ControlNet")
     parser.add_argument('--rerun_exist_images', action="store_true", help="Rerun existing images")
     parser.add_argument('--data_path', type=str, default="data", help="Path to the data directory containing mapping_file.json")
     parser.add_argument('--output_path', type=str, default="output", help="Path to save edited images")
@@ -63,8 +66,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--controlnet_model",
-        default="lllyasviel/control_v11p_sd15_openpose",
-        help="ControlNet checkpoint to use for pose guidance.",
+        default=None,
+        help="ControlNet checkpoint to use. If not specified, uses canny or seg model based on --use_sam flag.",
     )
     parser.add_argument(
         "--sd_model",
@@ -77,13 +80,13 @@ def parse_args() -> argparse.Namespace:
         "--conditioning_scale",
         type=float,
         default=0.1,
-        help="ControlNet conditioning strength (higher keeps pose closer to the original).",
+        help="ControlNet conditioning strength (higher keeps structure closer to the original).",
     )
     parser.add_argument(
         "--detect_resolution",
         type=int,
         default=512,
-        help="Resolution used by the OpenPose detector before feeding into ControlNet.",
+        help="Resolution used by the condition detector before feeding into ControlNet.",
     )
     parser.add_argument(
         "--exclude_hand_and_face",
@@ -97,11 +100,12 @@ def parse_args() -> argparse.Namespace:
         default=0.5,
         help="Ratio of steps to apply ControlNet (0.0-1.0). E.g., 0.5 means ControlNet only for first 50%% of steps.",
     )
+    parser.add_argument(
+        "--use_sam",
+        action="store_true",
+        help="Use SAM (Segment Anything Model) for segmentation-based conditioning instead of Canny edges.",
+    )
     return parser.parse_args()
-
-
-# Output folder name for this method
-IMAGE_SAVE_PATH = "controlnet+p2p"
 
 
 def main() -> None:
@@ -116,13 +120,21 @@ def main() -> None:
     # Initialize device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    print("Loading P2PEditor with ControlNet support...")
+    # Determine output folder name based on conditioning mode
+    if args.use_sam:
+        image_save_path = "sam+controlnet+p2p"
+        print("Loading P2PEditor with SAM + ControlNet support...")
+    else:
+        image_save_path = "canny+controlnet+p2p"
+        print("Loading P2PEditor with Canny + ControlNet support...")
+    
     editor = P2PEditor(
         method_list=["directinversion+controlnet+p2p"],
         device=device,
         num_ddim_steps=args.steps,
         controlnet_model=args.controlnet_model,
-        use_controlnet=True
+        use_controlnet=True,
+        use_sam=args.use_sam,
     )
     
     # Load mapping file
@@ -139,10 +151,10 @@ def main() -> None:
         image_path = os.path.join(f"{data_path}/annotation_images", item["image_path"])
         
         # Build output path
-        present_image_save_path = image_path.replace(data_path, os.path.join(output_path, IMAGE_SAVE_PATH))
+        present_image_save_path = image_path.replace(data_path, os.path.join(output_path, image_save_path))
         
         if ((not os.path.exists(present_image_save_path)) or rerun_exist_images):
-            print(f"editing image [{image_path}] with [controlnet+p2p]")
+            print(f"editing image [{image_path}] with [{image_save_path}]")
             setup_seed(args.seed)
             torch.cuda.empty_cache()
             
@@ -173,7 +185,7 @@ def main() -> None:
                 traceback.print_exc()
                 continue
         else:
-            print(f"skip image [{image_path}] with [controlnet+p2p]")
+            print(f"skip image [{image_path}] with [{image_save_path}]")
 
 
 if __name__ == "__main__":

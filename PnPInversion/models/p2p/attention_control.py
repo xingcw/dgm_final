@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as nnf
 import abc
-
+import logging
 from utils.utils import get_word_inds, get_time_words_attention_alpha
 from models.p2p import seq_aligner
 
@@ -10,6 +10,8 @@ LATENT_SIZE = (64, 64)
 LOW_RESOURCE = False 
 MAX_ATTN_SIZE = 64 ** 2
 
+# suppress the debugging info
+logging.getLogger().setLevel(logging.WARNING)
 
 def reshape_heads_to_batch_dim(tensor, heads):
     batch_size, seq_len, dim = tensor.shape
@@ -111,7 +113,7 @@ def register_attention_control(model, controller):
 
     # ---------- SDXL: hook all attn2 modules ----------
     if is_sdxl:
-        print("Detected SDXL UNet – registering all attn2 modules")
+        logging.info("Detected SDXL UNet – registering all attn2 modules")
 
         def hook_all_attn2_in_block(block, place_in_unet):
             nonlocal cross_att_count
@@ -129,12 +131,12 @@ def register_attention_control(model, controller):
             # SDXL: down_blocks[0] is plain DownBlock2D, 1–3 are CrossAttn
             used_down_idx = [max(1, n_down - 2), n_down - 1]  # typically [2,3]
             for i in used_down_idx:
-                print(f"registering SDXL down attention for down_blocks[{i}]")
+                logging.info(f"registering SDXL down attention for down_blocks[{i}]")
                 hook_all_attn2_in_block(unet.down_blocks[i], "down")
 
         # mid block: hook all attn2
         if hasattr(unet, "mid_block") and hasattr(unet.mid_block, "attentions"):
-            print("registering SDXL mid attention")
+            logging.info("registering SDXL mid attention")
             for att_block in unet.mid_block.attentions:
                 for trans_block in att_block.transformer_blocks:
                     attn2 = trans_block.attn2
@@ -147,26 +149,26 @@ def register_attention_control(model, controller):
             # SDXL: up_blocks[0–2] CrossAttnUp, up_blocks[3] UpBlock2D
             used_up_idx = [0, 1] if n_up >= 2 else [0]
             for i in used_up_idx:
-                print(f"registering SDXL up attention for up_blocks[{i}]")
+                logging.info(f"registering SDXL up attention for up_blocks[{i}]")
                 hook_all_attn2_in_block(unet.up_blocks[i], "up")
 
     # ---------- SD1.x / SD2.x: original behaviour ----------
     else:
-        print("Non-SDXL UNet – registering all attn2 (original P2P behaviour)")
+        logging.info("Non-SDXL UNet – registering all attn2 (original P2P behaviour)")
         sub_nets = unet.named_children()
         for name, net in sub_nets:
             if "down" in name:
-                print(f"registering down attention for {name}")
+                logging.info(f"registering down attention for {name}")
                 cross_att_count += register_recr(net, 0, "down", name)
             elif "up" in name:
-                print(f"registering up attention for {name}")
+                logging.info(f"registering up attention for {name}")
                 cross_att_count += register_recr(net, 0, "up", name)
             elif "mid" in name:
-                print(f"registering mid attention for {name}")
+                logging.info(f"registering mid attention for {name}")
                 cross_att_count += register_recr(net, 0, "mid", name)
 
     controller.num_att_layers = cross_att_count
-    print(f"Total hooked cross-attention layers: {controller.num_att_layers}")
+    logging.info(f"Total hooked cross-attention layers: {controller.num_att_layers}")
 
 
 def get_equalizer(text, word_select, values, tokenizer=None, is_sdxl=False):

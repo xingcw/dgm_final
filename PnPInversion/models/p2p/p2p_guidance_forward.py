@@ -89,15 +89,18 @@ def p2p_guidance_forward(
             uncond_embeddings_, pooled_uncond_embeds = encode_prompt_sdxl(model, [""] * batch_size, model.device)
         else:
             uncond_embeddings_ = None
-            pooled_uncond_embeds = None
-        
+            # Even when unconditional embeddings are supplied externally, we still need pooled
+            # embeddings for SDXL's added conditioning kwargs.
+            _, pooled_uncond_embeds = encode_prompt_sdxl(model, [""] * batch_size, model.device)
+
         # Prepare added_cond_kwargs
-        if uncond_embeddings_ is not None:
-            combined_pooled = torch.cat([pooled_uncond_embeds, pooled_text_embeds])
-            added_cond_kwargs = get_sdxl_unet_kwargs(
-                model, None, combined_pooled, 
-                2 * batch_size, model.device, dtype=text_embeddings.dtype
-            )
+        combined_pooled = torch.cat([pooled_uncond_embeds, pooled_text_embeds]).to(
+            device=model.device, dtype=text_embeddings.dtype
+        )
+        added_cond_kwargs = get_sdxl_unet_kwargs(
+            model, None, combined_pooled,
+            2 * batch_size, model.device, dtype=text_embeddings.dtype
+        )
     else:
         text_input = model.tokenizer(
             prompt,

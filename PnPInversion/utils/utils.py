@@ -130,17 +130,10 @@ def latent2image(model, latents, return_type='np', is_sdxl=None):
     
     latents = 1 / scaling_factor * latents.detach()
     
-    # SDXL VAE has numerical stability issues in float16, use float32 for decoding
-    if is_sdxl:
-        vae_dtype = next(vae.parameters()).dtype
-        vae.to(dtype=torch.float32)
-        latents = latents.to(dtype=torch.float32)
-        image = vae.decode(latents)['sample']
-        vae.to(dtype=vae_dtype)  # Convert back
-    else:
-        model_dtype = next(vae.parameters()).dtype
-        latents = latents.to(dtype=model_dtype)
-        image = vae.decode(latents)['sample']
+    # Use model dtype for decoding (no dtype conversion needed with improved VAE)
+    model_dtype = next(vae.parameters()).dtype
+    latents = latents.to(dtype=model_dtype)
+    image = vae.decode(latents)['sample']
     
     if return_type == 'np':
         image = (image / 2 + 0.5).clamp(0, 1)
@@ -154,18 +147,11 @@ def latent2image(model, latents, return_type='np', is_sdxl=None):
 def image2latent(model, image, is_sdxl=None):
     # Handle both pipeline and VAE being passed
     vae = model.vae if hasattr(model, 'vae') else model
-    
-    # Auto-detect model type
-    if is_sdxl is None:
-        is_sdxl = getattr(model, 'is_sdxl', False)
-    
     scaling_factor = get_vae_scaling_factor(model)
     
     # Get device from model parameters
     device = next(vae.parameters()).device
-    
-    # SDXL VAE has numerical stability issues in float16, use float32 for encoding
-    encode_dtype = torch.float32 if is_sdxl else next(vae.parameters()).dtype
+    vae_dtype = next(vae.parameters()).dtype
     
     with torch.no_grad():
         if type(image) is Image:
@@ -174,21 +160,10 @@ def image2latent(model, image, is_sdxl=None):
             latents = image
         else:
             image = torch.from_numpy(image).float() / 127.5 - 1
-            image = image.permute(2, 0, 1).unsqueeze(0).to(device=device, dtype=encode_dtype)
-            
-            # For SDXL, temporarily convert VAE to float32 for encoding
-            if is_sdxl:
-                vae_dtype = next(vae.parameters()).dtype
-                vae.to(dtype=torch.float32)
-                latents = vae.encode(image)['latent_dist'].mean
-                vae.to(dtype=vae_dtype)  # Convert back
-                latents = latents.to(dtype=vae_dtype)
-            else:
-                latents = vae.encode(image)['latent_dist'].mean
-            
+            image = image.permute(2, 0, 1).unsqueeze(0).to(device=device, dtype=vae_dtype)
+            latents = vae.encode(image)['latent_dist'].mean
             latents = latents * scaling_factor
     return latents
-
 
 
 def get_word_inds(text: str, word_place: int, tokenizer):

@@ -57,7 +57,14 @@ class P2PEditor:
                 variant="fp16",
                 use_safetensors=True
             )
+            # Replace VAE with improved version for better reconstruction quality
+            from diffusers import AutoencoderKL
+            self.ldm_stable.vae = AutoencoderKL.from_pretrained(
+                "madebyollin/sdxl-vae-fp16-fix",
+                torch_dtype=torch.float16
+            )
             self.ldm_stable.is_sdxl = True
+            print("Loaded improved SDXL VAE: madebyollin/sdxl-vae-fp16-fix")
         elif model_type == "sd21":
             # Load SD 2.1 pipeline - uses v_prediction
             from diffusers import StableDiffusionPipeline
@@ -245,7 +252,7 @@ class P2PEditor:
             image_gt=image_gt, prompt=prompt_src,guidance_scale=guidance_scale,num_inner_steps=0)
         x_t = x_stars[-1]
 
-        controller = AttentionStore()
+        controller = EmptyControl()
         reconstruct_latent, x_t = p2p_guidance_forward(model=self.ldm_stable, 
                                        prompt=[prompt_src], 
                                        controller=controller, 
@@ -310,7 +317,7 @@ class P2PEditor:
             image_gt=image_gt, prompt=prompt_src,guidance_scale=guidance_scale)
         x_t = x_stars[-1]
 
-        controller = AttentionStore()
+        controller = EmptyControl()
         reconstruct_latent, x_t = p2p_guidance_forward(model=self.ldm_stable, 
                                        prompt=[prompt_src], 
                                        controller=controller, 
@@ -375,7 +382,7 @@ class P2PEditor:
             image_gt=image_gt, prompt=prompt_src,guidance_scale=guidance_scale)
         x_t = x_stars[-1]
 
-        controller = AttentionStore()
+        controller = EmptyControl()
         reconstruct_latent, x_t = p2p_guidance_forward_single_branch(model=self.ldm_stable, 
                                        prompt=[prompt_src], 
                                        controller=controller, 
@@ -449,7 +456,7 @@ class P2PEditor:
             image_gt=image_gt, prompt=prompt_src, npi_interp=npi_interp)
         x_t = x_stars[-1]
 
-        controller = AttentionStore()
+        controller = EmptyControl()
         reconstruct_latent, x_t = proximal_guidance_forward(
                     model=self.ldm_stable,
                     prompt=[prompt_src],
@@ -535,7 +542,7 @@ class P2PEditor:
             image_gt=image_gt, prompt=prompts,guidance_scale=guidance_scale)
         x_t = x_stars[-1]
 
-        controller = AttentionStore()
+        controller = EmptyControl()
         
         reconstruct_latent, x_t = direct_inversion_p2p_guidance_forward(model=self.ldm_stable, 
                                        prompt=prompts, 
@@ -606,7 +613,7 @@ class P2PEditor:
             forward_guidance_scale=forward_guidance_scale)
         x_t = x_stars[-1]
 
-        controller = AttentionStore()
+        controller = EmptyControl()
         
         reconstruct_latent, x_t = direct_inversion_p2p_guidance_forward(model=self.ldm_stable, 
                                        prompt=prompts, 
@@ -683,7 +690,7 @@ class P2PEditor:
             image_gt=image_gt, prompt=prompt_src,guidance_scale=guidance_scale)
         x_t = x_stars[-1]
 
-        controller = AttentionStore()
+        controller = EmptyControl()
         reconstruct_latent, x_t = proximal_guidance_forward(
                     model=self.ldm_stable,
                     prompt=[prompt_src],
@@ -769,7 +776,7 @@ class P2PEditor:
             image_gt=image_gt, prompt=prompts,guidance_scale=guidance_scale)
         x_t = x_stars[-1]
 
-        controller = AttentionStore()
+        controller = EmptyControl()
         
         reconstruct_latent, x_t = direct_inversion_p2p_guidance_forward(model=self.ldm_stable, 
                                        prompt=prompts, 
@@ -840,7 +847,7 @@ class P2PEditor:
             image_gt=image_gt, prompt=prompts,guidance_scale=guidance_scale,scale=scale)
         x_t = x_stars[-1]
 
-        controller = AttentionStore()
+        controller = EmptyControl()
         
         reconstruct_latent, x_t = direct_inversion_p2p_guidance_forward(model=self.ldm_stable, 
                                        prompt=prompts, 
@@ -911,7 +918,7 @@ class P2PEditor:
             image_gt=image_gt, prompt=prompts,guidance_scale=guidance_scale,skip_step=skip_step)
         x_t = x_stars[-1]
 
-        controller = AttentionStore()
+        controller = EmptyControl()
         
         reconstruct_latent, x_t = direct_inversion_p2p_guidance_forward(model=self.ldm_stable, 
                                        prompt=prompts, 
@@ -980,7 +987,7 @@ class P2PEditor:
             image_gt=image_gt, prompt=prompts,guidance_scale=guidance_scale)
         x_t = x_stars[-1]
 
-        controller = AttentionStore()
+        controller = EmptyControl()
         
         reconstruct_latent, x_t = direct_inversion_p2p_guidance_forward_add_target(model=self.ldm_stable, 
                                        prompt=prompts, 
@@ -1055,7 +1062,7 @@ class P2PEditor:
         for i in range(len(noise_loss_list)):
             noise_loss_list_new.append(noise_loss_list[i][[0]].repeat(2,1,1,1))
         
-        controller = AttentionStore()
+        controller = EmptyControl()
         
         reconstruct_latent, x_t = direct_inversion_p2p_guidance_forward_add_target(model=self.ldm_stable, 
                                        prompt=prompts, 

@@ -12,8 +12,7 @@ python run_editing_p2p.py \
     --edit_category_list 0 1 2 3 4 5 6 7 8 9 \
     --edit_method_list directinversion+p2p \
     --data_path data \
-    --model_type ${MODEL_TYPE} \
-    --text_encoder default
+    --model_type ${MODEL_TYPE}
 
 # python evaluation/evaluate.py --metrics "structure_distance" \
 #     "psnr_unedit_part" "lpips_unedit_part" "mse_unedit_part" \

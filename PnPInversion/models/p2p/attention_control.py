@@ -8,6 +8,7 @@ from models.p2p import seq_aligner
 MAX_NUM_WORDS = 77
 LATENT_SIZE = (64, 64)
 LOW_RESOURCE = False 
+MAX_ATTN_SIZE = 64 ** 2
 
 
 def reshape_heads_to_batch_dim(tensor, heads):
@@ -108,19 +109,19 @@ def register_attention_control(model, controller):
                 count = register_recr(net__, count, place_in_unet, module_path)
         return count
 
-    # ---------- SDXL: hook only a small subset of attn2 ----------
+    # ---------- SDXL: hook all attn2 modules ----------
     if is_sdxl:
-        print("Detected SDXL UNet – registering a subset of attn2 modules")
+        print("Detected SDXL UNet – registering all attn2 modules")
 
-        def hook_last_attn2_in_block(block, place_in_unet):
+        def hook_all_attn2_in_block(block, place_in_unet):
             nonlocal cross_att_count
             # block.attentions: list[Transformer2DModel]
-            att_block = block.attentions[-1]
-            # each Transformer2DModel has transformer_blocks: list[...]
-            last_trans = att_block.transformer_blocks[-1]
-            attn2 = last_trans.attn2
-            attn2.forward = ca_forward(attn2, place_in_unet)
-            cross_att_count += 1
+            for att_block in block.attentions:
+                # each Transformer2DModel has transformer_blocks: list[...]
+                for trans_block in att_block.transformer_blocks:
+                    attn2 = trans_block.attn2
+                    attn2.forward = ca_forward(attn2, place_in_unet)
+                    cross_att_count += 1
 
         # down path: use last 2 cross-attn blocks (32x32, 16x16)
         if hasattr(unet, "down_blocks"):
@@ -129,16 +130,16 @@ def register_attention_control(model, controller):
             used_down_idx = [max(1, n_down - 2), n_down - 1]  # typically [2,3]
             for i in used_down_idx:
                 print(f"registering SDXL down attention for down_blocks[{i}]")
-                hook_last_attn2_in_block(unet.down_blocks[i], "down")
+                hook_all_attn2_in_block(unet.down_blocks[i], "down")
 
-        # mid block: always use last attn2
+        # mid block: hook all attn2
         if hasattr(unet, "mid_block") and hasattr(unet.mid_block, "attentions"):
             print("registering SDXL mid attention")
-            att_block = unet.mid_block.attentions[-1]
-            last_trans = att_block.transformer_blocks[-1]
-            attn2 = last_trans.attn2
-            attn2.forward = ca_forward(attn2, "mid")
-            cross_att_count += 1
+            for att_block in unet.mid_block.attentions:
+                for trans_block in att_block.transformer_blocks:
+                    attn2 = trans_block.attn2
+                    attn2.forward = ca_forward(attn2, "mid")
+                    cross_att_count += 1
 
         # up path: use first 2 cross-attn blocks (16x16, 32x32)
         if hasattr(unet, "up_blocks"):
@@ -147,7 +148,7 @@ def register_attention_control(model, controller):
             used_up_idx = [0, 1] if n_up >= 2 else [0]
             for i in used_up_idx:
                 print(f"registering SDXL up attention for up_blocks[{i}]")
-                hook_last_attn2_in_block(unet.up_blocks[i], "up")
+                hook_all_attn2_in_block(unet.up_blocks[i], "up")
 
     # ---------- SD1.x / SD2.x: original behaviour ----------
     else:
@@ -230,17 +231,49 @@ class LocalBlend:
         """
         maps: list of attention tensors, each [B*H, N, T]
         reshape -> [B, n_layers, 1, H_attn, W_attn, T]
+        Handles maps with different spatial resolutions by upsampling to common resolution
         """
         B = self.alpha_layers.shape[0]
-        out = []
+        reshaped_maps = []
+        resolutions = []
+        
+        # First pass: reshape all maps and collect resolutions
         for item in maps:
             bh, n, t = item.shape  # n = H_attn * W_attn, t = #tokens
             attn_res = int(n ** 0.5)
             assert attn_res * attn_res == n, "attention spatial size must be square"
             # we don't care about the head dimension; just stack all heads in dim=1
-            out.append(
-                item.reshape(B, -1, 1, attn_res, attn_res, t)
-            )
+            reshaped = item.reshape(B, -1, 1, attn_res, attn_res, t)
+            reshaped_maps.append(reshaped)
+            resolutions.append(attn_res)
+        
+        # Find maximum resolution to upsample all maps to
+        max_res = max(resolutions) if resolutions else 64
+        
+        # Second pass: upsample all maps to max_res if needed
+        out = []
+        for reshaped, orig_res in zip(reshaped_maps, resolutions):
+            if orig_res != max_res:
+                # Upsample spatial dimensions (H_attn, W_attn) to max_res
+                # reshaped: [B, n_heads, 1, H_orig, W_orig, T]
+                B_shape, n_heads, _, H_orig, W_orig, T = reshaped.shape
+                # Reshape to [B * n_heads * T, 1, H_orig, W_orig] for batch interpolation
+                reshaped_flat = reshaped.permute(0, 1, 5, 2, 3, 4)  # [B, n_heads, T, 1, H, W]
+                reshaped_flat = reshaped_flat.reshape(B_shape * n_heads * T, 1, H_orig, W_orig)
+                # Upsample spatial dimensions
+                upsampled = nnf.interpolate(
+                    reshaped_flat,
+                    size=(max_res, max_res),
+                    mode='bilinear',
+                    align_corners=False
+                )
+                # Reshape back to [B, n_heads, 1, max_res, max_res, T]
+                upsampled = upsampled.reshape(B_shape, n_heads, T, 1, max_res, max_res)
+                upsampled = upsampled.permute(0, 1, 3, 4, 5, 2)  # [B, n_heads, 1, max_res, max_res, T]
+                out.append(upsampled)
+            else:
+                out.append(reshaped)
+        
         return torch.cat(out, dim=1)
 
     def get_mask(self, maps, alpha, use_pool, latent_hw):
@@ -381,7 +414,7 @@ class AttentionStore(AttentionControl):
 
     def forward(self, attn, is_cross, place_in_unet):
         key = f"{place_in_unet}_{'cross' if is_cross else 'self'}"
-        if attn.shape[1] <= 32 ** 2:  # avoid memory overhead
+        if attn.shape[1] <= MAX_ATTN_SIZE:  # avoid memory overhead
             self.step_store[key].append(attn)
         return attn
 
@@ -417,7 +450,7 @@ class AttentionControlEdit(AttentionStore, abc.ABC):
         return x_t
         
     def replace_self_attention(self, attn_base, att_replace, place_in_unet):
-        if att_replace.shape[2] <= 32 ** 2:
+        if att_replace.shape[2] <= MAX_ATTN_SIZE:
             attn_base = attn_base.unsqueeze(0).expand(att_replace.shape[0], *attn_base.shape)
             return attn_base
         else:

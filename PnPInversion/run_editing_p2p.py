@@ -90,9 +90,6 @@ if __name__ == "__main__":
                         help="Model type: sdxl (~16-24GB), sd21 (~8-10GB), sd15 (~6-8GB), sd14 (~6-8GB)")
     parser.add_argument('--low_memory', action="store_true", 
                         help="Enable memory optimizations (CPU offload, attention slicing)")
-    parser.add_argument('--text_encoder', type=str, default="default", 
-                        choices=["default", "openclip-bigg", "openclip-h", "gpt2-large", "gpt2-small"],
-                        help="Text encoder for SDXL: default, openclip-bigg, openclip-h, gpt2-large (LLM, 1280-dim exact match!)")
     args = parser.parse_args()
     
     rerun_exist_images=args.rerun_exist_images
@@ -102,8 +99,7 @@ if __name__ == "__main__":
     edit_method_list=args.edit_method_list
     
     p2p_editor=P2PEditor(edit_method_list, torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu'),
-                         num_ddim_steps=50, model_type=args.model_type, low_memory=args.low_memory,
-                         text_encoder_type=args.text_encoder)
+                         num_ddim_steps=50, model_type=args.model_type, low_memory=args.low_memory)
     
     with open(f"{data_path}/mapping_file.json", "r") as f:
         editing_instruction = json.load(f)

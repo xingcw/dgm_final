@@ -8,6 +8,9 @@ Usage:
     # Compare multiple CSV files:
     python compare_methods.py --csvs file1.csv file2.csv file3.csv
     
+    # Compare multiple CSV files with custom method names:
+    python compare_methods.py --csvs file1.csv file2.csv file3.csv --method-names "Method A" "Method B" "Method C"
+    
     # Compare two methods within the same CSV file:
     python compare_methods.py --csv1 evaluation_result.csv --method1 "1_directinversion+p2p" --method2 "1_ddim+p2p"
     
@@ -255,7 +258,7 @@ def compare_two_methods(df1, df2, label1, label2, common_metrics):
     return results, summary_table, merged
 
 
-def compare_methods(csv1=None, csv2=None, method1=None, method2=None, csvs=None, output=None, latex_output=None):
+def compare_methods(csv1=None, csv2=None, method1=None, method2=None, csvs=None, output=None, latex_output=None, method_names=None):
     """
     Main comparison function.
     
@@ -266,7 +269,7 @@ def compare_methods(csv1=None, csv2=None, method1=None, method2=None, csvs=None,
     
     # Handle multiple CSV files
     if csvs is not None and len(csvs) >= 2:
-        return compare_multiple_methods(csvs, output, latex_output)
+        return compare_multiple_methods(csvs, output, latex_output, method_names)
     
     # Handle legacy two-file comparison
     if csv2 is None and method2 is None:
@@ -465,16 +468,9 @@ def create_latex_table(dataframes, labels, common_metrics, baseline_idx=0):
         ]
     }
     
-    # Extract method names from labels
-    method_names = []
+    # Use labels directly as method names (they're already correctly set)
+    method_names = labels
     editing_method = "direct inversion + p2p"
-    
-    for label in labels:
-        match = re.search(r'sd\d+', label.lower())
-        if match:
-            method_names.append(match.group().upper())
-        else:
-            method_names.append(label)
     
     # Count total columns: Method column (Inverse/Editing) + metric columns
     num_metric_cols = sum(len(metrics_list) for metrics_list in metric_groups.values())
@@ -687,17 +683,9 @@ def create_side_by_side_table(dataframes, labels, common_metrics, baseline_idx=0
         ]
     }
     
-    # Extract method names from labels
-    method_names = []
+    # Use labels directly as method names (they're already correctly set)
+    method_names = labels
     editing_method = "direct inversion + p2p"  # Common editing method
-    
-    for label in labels:
-        # Try to extract method name from label
-        match = re.search(r'sd\d+', label.lower())
-        if match:
-            method_names.append(match.group().upper())
-        else:
-            method_names.append(label)
     
     # Build table structure: rows are metrics, columns are methods
     table_rows = []
@@ -773,7 +761,7 @@ def create_side_by_side_table(dataframes, labels, common_metrics, baseline_idx=0
     return table_rows, len(common_file_ids)
 
 
-def compare_multiple_methods(csvs, output=None, latex_output=None):
+def compare_multiple_methods(csvs, output=None, latex_output=None, method_names=None):
     """
     Compare multiple CSV files pairwise and in side-by-side format.
     
@@ -781,8 +769,14 @@ def compare_multiple_methods(csvs, output=None, latex_output=None):
         csvs: List of CSV file paths
         output: Optional output file path for text results
         latex_output: Optional output file path for LaTeX table code
+        method_names: Optional list of method names (must match length of csvs)
     """
     import os
+    
+    # Validate method_names if provided
+    if method_names is not None:
+        if len(method_names) != len(csvs):
+            raise ValueError(f"Number of method names ({len(method_names)}) must match number of CSV files ({len(csvs)})")
     
     # Load all dataframes
     dataframes = []
@@ -790,16 +784,21 @@ def compare_multiple_methods(csvs, output=None, latex_output=None):
     
     for i, csv_path in enumerate(csvs):
         df, name = load_and_extract(csv_path, None)
-        # Use filename as label if name is None
-        if name is None:
-            name = os.path.basename(csv_path).replace('.csv', '')
-        # Try to extract method name (e.g., sd14, sd15, sd21)
-        import re
-        match = re.search(r'sd\d+', name.lower())
-        if match:
-            label = match.group().upper()
+        
+        # Use provided method name if available, otherwise auto-detect
+        if method_names is not None and i < len(method_names):
+            label = method_names[i]
         else:
-            label = name
+            # Use filename as label if name is None
+            if name is None:
+                name = os.path.basename(csv_path).replace('.csv', '')
+            # Try to extract method name (e.g., sd14, sd15, sd21)
+            import re
+            match = re.search(r'sd\d+', name.lower())
+            if match:
+                label = match.group().upper()
+            else:
+                label = name
         dataframes.append(df)
         labels.append(label)
     
@@ -1074,6 +1073,8 @@ def main():
                         help="Name of first method (auto-detected if not provided)")
     parser.add_argument('--method2', type=str, default=None,
                         help="Name of second method (for comparing methods within same file)")
+    parser.add_argument('--method-names', type=str, nargs='+', default=None,
+                        help="Names of methods when comparing multiple CSV files (must match number of CSV files)")
     parser.add_argument('--output', type=str, default=None,
                         help="Path to save comparison results")
     parser.add_argument('--latex', type=str, default=None,
@@ -1084,7 +1085,7 @@ def main():
     # Determine which mode to use
     if args.csvs is not None and len(args.csvs) >= 2:
         # Multiple files mode
-        compare_methods(csvs=args.csvs, output=args.output, latex_output=args.latex)
+        compare_methods(csvs=args.csvs, output=args.output, latex_output=args.latex, method_names=args.method_names)
     elif args.csv1 is not None:
         # Legacy two-file mode
         if args.csv2 is None and args.method2 is None:

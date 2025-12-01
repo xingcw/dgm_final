@@ -512,39 +512,6 @@ class P2PEditor:
         image_gt = load_512(image_path)
         prompts = [prompt_src, prompt_tar]
 
-        # Generate pose condition image if ControlNet is available
-        control_image = None
-        if self.use_controlnet and self.openpose_detector is not None:
-            pose_image = self.openpose_detector(
-                Image.fromarray(image_gt),
-                detect_resolution=detect_resolution,
-                hand_and_face=include_hand_and_face,
-            )
-            
-            # Check if pose detection succeeded (OpenPose only works for humans, not animals/birds)
-            pose_array_check = np.array(pose_image.convert('RGB'))
-            pose_mean = pose_array_check.mean()
-            pose_detection_succeeded = pose_mean > 10  # Threshold: if mean < 10, likely all black
-            
-            if pose_detection_succeeded:
-                # Prepare control image for ControlNet
-                if pose_image.mode != 'RGB':
-                    pose_image = pose_image.convert('RGB')
-                
-                # Convert PIL to tensor and normalize to [-1, 1]
-                import torchvision.transforms as transforms
-                transform = transforms.Compose([
-                    transforms.Resize((512, 512)),
-                    transforms.ToTensor(),  # Converts to [C, H, W] in range [0, 1]
-                ])
-                control_image = transform(pose_image).unsqueeze(0).to(self.device)  # [1, C, H, W]
-                control_image = control_image * 2.0 - 1.0  # Normalize to [-1, 1]
-                
-                # Ensure control image matches ControlNet dtype
-                if self.controlnet is not None:
-                    controlnet_dtype = next(self.controlnet.parameters()).dtype
-                    control_image = control_image.to(dtype=controlnet_dtype)
-
         null_inversion = DirectInversion(model=self.ldm_stable,
                                     num_ddim_steps=self.num_ddim_steps)
         _, _, x_stars, noise_loss_list = null_inversion.invert(

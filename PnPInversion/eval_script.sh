@@ -7,11 +7,11 @@
 
 export MODEL_NAME=sd15_v1
 
-# python run_editing_p2p.py \
-#     --output_path output/${MODEL_NAME} \
-#     --edit_category_list 0 1 2 3 4 5 6 7 8 9 \
-#     --edit_method_list directinversion+p2p \
-#     --data_path data
+python run_editing_p2p.py \
+    --output_path output/debug/${MODEL_NAME} \
+    --edit_category_list 0 1 2 3 4 5 6 7 8 9 \
+    --edit_method_list directinversion+p2p \
+    --data_path data
 
 # python evaluation/evaluate.py --metrics "structure_distance" \
 #     "psnr_unedit_part" "lpips_unedit_part" "mse_unedit_part" \
@@ -22,7 +22,7 @@ export MODEL_NAME=sd15_v1
 #     --tgt_methods 1_directinversion+p2p \
 #     --tgt_image_folders output/${MODEL_NAME}/directinversion+p2p/annotation_images
 
-python compare_methods.py \
-    --csv1 results/evaluation_result_ddimp2p.csv --csv2 results/evaluation_result_original_p2p.csv \
-    --method1 "ddim_p2p" --method2 "original_p2p" \
-    --output results/comparison_results_ddim_p2p.txt
+# python compare_methods.py \
+#     --csv1 results/evaluation_result_ddimp2p.csv --csv2 results/evaluation_result_original_p2p.csv \
+#     --method1 "ddim_p2p" --method2 "original_p2p" \
+#     --output results/comparison_results_ddim_p2p.txt

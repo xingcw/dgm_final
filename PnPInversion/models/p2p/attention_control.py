@@ -9,6 +9,21 @@ MAX_NUM_WORDS = 77
 LATENT_SIZE = (64, 64)
 LOW_RESOURCE = False 
 
+
+def reshape_heads_to_batch_dim(tensor, heads):
+    batch_size, seq_len, dim = tensor.shape
+    head_size = heads
+    tensor = tensor.reshape(batch_size, seq_len, head_size, dim // head_size)
+    tensor = tensor.permute(0, 2, 1, 3).reshape(batch_size * head_size, seq_len, dim // head_size)
+    return tensor
+
+def reshape_batch_dim_to_heads(tensor, heads):
+    batch_size, seq_len, dim = tensor.shape
+    head_size = heads
+    tensor = tensor.reshape(batch_size // head_size, head_size, seq_len, dim)
+    tensor = tensor.permute(0, 2, 1, 3).reshape(batch_size // head_size, seq_len, dim * head_size)
+    return tensor
+
 def register_attention_control(model, controller):
     def ca_forward(self, place_in_unet):
         to_out = self.to_out
@@ -17,7 +32,12 @@ def register_attention_control(model, controller):
         else:
             to_out = self.to_out
 
-        def forward(x, context=None, mask=None, **kwargs):
+        def forward(x, encoder_hidden_states=None, attention_mask=None, context=None, mask=None, **kwargs):
+            # Handle diffusers API: encoder_hidden_states takes precedence over context
+            if encoder_hidden_states is not None:
+                context = encoder_hidden_states
+            if attention_mask is not None:
+                mask = attention_mask
             if isinstance(context, dict):  # NOTE: compatible with ELITE (0.11.1)
                 context = context['CONTEXT_TENSOR']
             batch_size, sequence_length, dim = x.shape
@@ -27,9 +47,9 @@ def register_attention_control(model, controller):
             context = context if is_cross else x
             k = self.to_k(context)
             v = self.to_v(context)
-            q = self.reshape_heads_to_batch_dim(q)
-            k = self.reshape_heads_to_batch_dim(k)
-            v = self.reshape_heads_to_batch_dim(v)
+            q = reshape_heads_to_batch_dim(q, h)
+            k = reshape_heads_to_batch_dim(k, h)
+            v = reshape_heads_to_batch_dim(v, h)
 
             sim = torch.einsum("b i d, b j d -> b i j", q, k) * self.scale
 
@@ -43,7 +63,7 @@ def register_attention_control(model, controller):
             attn = sim.softmax(dim=-1)
             attn = controller(attn, is_cross, place_in_unet)
             out = torch.einsum("b i j, b j d -> b i d", attn, v)
-            out = self.reshape_batch_dim_to_heads(out)
+            out = reshape_batch_dim_to_heads(out, h)
             return to_out(out)
 
         return forward
@@ -60,7 +80,7 @@ def register_attention_control(model, controller):
         controller = DummyController()
 
     def register_recr(net_, count, place_in_unet):
-        if net_.__class__.__name__ == 'CrossAttention':
+        if net_.__class__.__name__ == 'CrossAttention' or net_.__class__.__name__ == 'Attention':
             net_.forward = ca_forward(net_, place_in_unet)
             return count + 1
         elif hasattr(net_, 'children'):

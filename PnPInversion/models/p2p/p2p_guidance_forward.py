@@ -236,115 +236,115 @@ def p2p_guidance_diffusion_step_controlnet(model, controller, latents, context, 
         with torch.no_grad():
             # Access ControlNet's conditioning encoder
             # ControlNet processes controlnet_cond through its conditioning_embedding
-            if hasattr(model.controlnet, 'conditioning_embedding'):
-                # Process through conditioning embedding layers
-                control_embeds = model.controlnet.conditioning_embedding(control_image_input)
-                # Flatten spatial dimensions to get sequence of embeddings
-                # control_embeds shape: [batch, channels, height, width]
-                # We need to reshape to [batch, height*width, channels] to match text embedding format
-                b, c, h, w = control_embeds.shape
-                control_embeds = control_embeds.reshape(b, c, h * w).permute(0, 2, 1)  # [batch, h*w, c]
+            # if hasattr(model.controlnet, 'conditioning_embedding'):
+            #     # Process through conditioning embedding layers
+            #     control_embeds = model.controlnet.conditioning_embedding(control_image_input)
+            #     # Flatten spatial dimensions to get sequence of embeddings
+            #     # control_embeds shape: [batch, channels, height, width]
+            #     # We need to reshape to [batch, height*width, channels] to match text embedding format
+            #     b, c, h, w = control_embeds.shape
+            #     control_embeds = control_embeds.reshape(b, c, h * w).permute(0, 2, 1)  # [batch, h*w, c]
                 
-                # Project to match text embedding dimension if needed
-                if control_embeds.shape[-1] != context.shape[-1]:
-                    # Use a simple linear projection or average pool
-                    # For simplicity, we'll use average pooling across spatial dims and expand
-                    control_embeds = control_embeds.mean(dim=1, keepdim=True)  # [batch, 1, c]
-                    # Expand to match text sequence length (typically 77)
-                    text_seq_len = context.shape[1]
-                    control_embeds = control_embeds.expand(b, text_seq_len, control_embeds.shape[-1])
-                    # Project to text embedding dimension
-                    if control_embeds.shape[-1] != context.shape[-1]:
-                        # Create a simple projection (or use ControlNet's existing projection)
-                        if not hasattr(model.controlnet, '_control_embed_proj'):
-                            import torch.nn as nn
-                            model.controlnet._control_embed_proj = nn.Linear(
-                                control_embeds.shape[-1], context.shape[-1]
-                            ).to(control_embeds.device).to(control_embeds.dtype)
-                        control_embeds = model.controlnet._control_embed_proj(control_embeds)
+            #     # Project to match text embedding dimension if needed
+            #     if control_embeds.shape[-1] != context.shape[-1]:
+            #         # Use a simple linear projection or average pool
+            #         # For simplicity, we'll use average pooling across spatial dims and expand
+            #         control_embeds = control_embeds.mean(dim=1, keepdim=True)  # [batch, 1, c]
+            #         # Expand to match text sequence length (typically 77)
+            #         text_seq_len = context.shape[1]
+            #         control_embeds = control_embeds.expand(b, text_seq_len, control_embeds.shape[-1])
+            #         # Project to text embedding dimension
+            #         if control_embeds.shape[-1] != context.shape[-1]:
+            #             # Create a simple projection (or use ControlNet's existing projection)
+            #             if not hasattr(model.controlnet, '_control_embed_proj'):
+            #                 import torch.nn as nn
+            #                 model.controlnet._control_embed_proj = nn.Linear(
+            #                     control_embeds.shape[-1], context.shape[-1]
+            #                 ).to(control_embeds.device).to(control_embeds.dtype)
+            #             control_embeds = model.controlnet._control_embed_proj(control_embeds)
                 
-                # Scale control embeddings by conditioning_scale
-                control_embeds = control_embeds * controlnet_conditioning_scale
+            #     # Scale control embeddings by conditioning_scale
+            #     control_embeds = control_embeds * controlnet_conditioning_scale
                 
-                # Concatenate control embeddings with text embeddings in context
-                # Context shape: [batch*2, seq_len, embed_dim] where first half is uncond, second is text
-                context_batch_size = context.shape[0]
-                if context_batch_size == batch_size * 2:
-                    # Context is [uncond_embeddings, text_embeddings]
-                    # Add control embeddings to both uncond and text branches
-                    uncond_context = context[:batch_size]
-                    text_context = context[batch_size:]
-                    # Concatenate control embeddings with text embeddings
-                    uncond_context_with_control = torch.cat([uncond_context, control_embeds], dim=1)
-                    text_context_with_control = torch.cat([text_context, control_embeds], dim=1)
-                    context = torch.cat([uncond_context_with_control, text_context_with_control], dim=0)
-                else:
-                    # Single branch - just concatenate
-                    context = torch.cat([context, control_embeds], dim=1)
+            #     # Concatenate control embeddings with text embeddings in context
+            #     # Context shape: [batch*2, seq_len, embed_dim] where first half is uncond, second is text
+            #     context_batch_size = context.shape[0]
+            #     if context_batch_size == batch_size * 2:
+            #         # Context is [uncond_embeddings, text_embeddings]
+            #         # Add control embeddings to both uncond and text branches
+            #         uncond_context = context[:batch_size]
+            #         text_context = context[batch_size:]
+            #         # Concatenate control embeddings with text embeddings
+            #         uncond_context_with_control = torch.cat([uncond_context, control_embeds], dim=1)
+            #         text_context_with_control = torch.cat([text_context, control_embeds], dim=1)
+            #         context = torch.cat([uncond_context_with_control, text_context_with_control], dim=0)
+            #     else:
+            #         # Single branch - just concatenate
+            #         context = torch.cat([context, control_embeds], dim=1)
+            # else:
+            # Fallback: if conditioning_embedding not accessible, use ControlNet's full processing
+            # but still integrate into attention via context modification
+            # This is a simpler fallback that still uses ControlNet but integrates it differently
+            latents_controlnet = latents.to(dtype=controlnet_dtype)
+            context_batch_size = context.shape[0]
+            if context_batch_size == batch_size * 2:
+                controlnet_encoder_hidden_states = context[batch_size:].to(dtype=controlnet_dtype)
             else:
-                # Fallback: if conditioning_embedding not accessible, use ControlNet's full processing
-                # but still integrate into attention via context modification
-                # This is a simpler fallback that still uses ControlNet but integrates it differently
-                latents_controlnet = latents.to(dtype=controlnet_dtype)
-                context_batch_size = context.shape[0]
-                if context_batch_size == batch_size * 2:
-                    controlnet_encoder_hidden_states = context[batch_size:].to(dtype=controlnet_dtype)
-                else:
-                    controlnet_encoder_hidden_states = context.to(dtype=controlnet_dtype)
-                
-                controlnet_output = model.controlnet(
-                    sample=latents_controlnet,
-                    timestep=t,
-                    encoder_hidden_states=controlnet_encoder_hidden_states,
-                    controlnet_cond=control_image_input,
-                    conditioning_scale=controlnet_conditioning_scale,
-                    return_dict=False,
-                )
-                down_block_res_samples, mid_block_res_sample = controlnet_output
-                
+                controlnet_encoder_hidden_states = context.to(dtype=controlnet_dtype)
+            
+            controlnet_output = model.controlnet(
+                sample=latents_controlnet,
+                timestep=t,
+                encoder_hidden_states=controlnet_encoder_hidden_states,
+                controlnet_cond=control_image_input,
+                conditioning_scale=controlnet_conditioning_scale,
+                return_dict=False,
+            )
+            down_block_res_samples, mid_block_res_sample = controlnet_output
+            
+            if down_block_res_samples is not None:
+                down_block_res_samples = [res.to(dtype=latents.dtype) for res in down_block_res_samples]
+            if mid_block_res_sample is not None:
+                mid_block_res_sample = mid_block_res_sample.to(dtype=latents.dtype)
+            
+            # Use ControlNet outputs as residuals (original approach)
+            if low_resource:
+                noise_pred_uncond = model.unet(
+                    latents, 
+                    t, 
+                    encoder_hidden_states=context[0],
+                    down_block_additional_residuals=down_block_res_samples if down_block_res_samples is not None else None,
+                    mid_block_additional_residual=mid_block_res_sample if mid_block_res_sample is not None else None,
+                )["sample"]
+                noise_prediction_text = model.unet(
+                    latents, 
+                    t, 
+                    encoder_hidden_states=context[1],
+                    down_block_additional_residuals=down_block_res_samples if down_block_res_samples is not None else None,
+                    mid_block_additional_residual=mid_block_res_sample if mid_block_res_sample is not None else None,
+                )["sample"]
+            else:
+                latents_input = torch.cat([latents] * 2)
                 if down_block_res_samples is not None:
-                    down_block_res_samples = [res.to(dtype=latents.dtype) for res in down_block_res_samples]
-                if mid_block_res_sample is not None:
-                    mid_block_res_sample = mid_block_res_sample.to(dtype=latents.dtype)
-                
-                # Use ControlNet outputs as residuals (original approach)
-                if low_resource:
-                    noise_pred_uncond = model.unet(
-                        latents, 
-                        t, 
-                        encoder_hidden_states=context[0],
-                        down_block_additional_residuals=down_block_res_samples if down_block_res_samples is not None else None,
-                        mid_block_additional_residual=mid_block_res_sample if mid_block_res_sample is not None else None,
-                    )["sample"]
-                    noise_prediction_text = model.unet(
-                        latents, 
-                        t, 
-                        encoder_hidden_states=context[1],
-                        down_block_additional_residuals=down_block_res_samples if down_block_res_samples is not None else None,
-                        mid_block_additional_residual=mid_block_res_sample if mid_block_res_sample is not None else None,
-                    )["sample"]
+                    down_block_res_samples_duplicated = [torch.cat([res, res], dim=0) for res in down_block_res_samples]
+                    mid_block_res_sample_duplicated = torch.cat([mid_block_res_sample, mid_block_res_sample], dim=0) if mid_block_res_sample is not None else None
                 else:
-                    latents_input = torch.cat([latents] * 2)
-                    if down_block_res_samples is not None:
-                        down_block_res_samples_duplicated = [torch.cat([res, res], dim=0) for res in down_block_res_samples]
-                        mid_block_res_sample_duplicated = torch.cat([mid_block_res_sample, mid_block_res_sample], dim=0) if mid_block_res_sample is not None else None
-                    else:
-                        down_block_res_samples_duplicated = None
-                        mid_block_res_sample_duplicated = None
-                        
-                    noise_pred = model.unet(
-                        latents_input, 
-                        t, 
-                        encoder_hidden_states=context,
-                        down_block_additional_residuals=down_block_res_samples_duplicated,
-                        mid_block_additional_residual=mid_block_res_sample_duplicated,
-                    )["sample"]
-                    noise_pred_uncond, noise_prediction_text = noise_pred.chunk(2)
-                noise_pred = noise_pred_uncond + guidance_scale * (noise_prediction_text - noise_pred_uncond)
-                latents = model.scheduler.step(noise_pred, t, latents)["prev_sample"]
-                latents = controller.step_callback(latents)
-                return latents
-    
+                    down_block_res_samples_duplicated = None
+                    mid_block_res_sample_duplicated = None
+                    
+                noise_pred = model.unet(
+                    latents_input, 
+                    t, 
+                    encoder_hidden_states=context,
+                    down_block_additional_residuals=down_block_res_samples_duplicated,
+                    mid_block_additional_residual=mid_block_res_sample_duplicated,
+                )["sample"]
+                noise_pred_uncond, noise_prediction_text = noise_pred.chunk(2)
+            noise_pred = noise_pred_uncond + guidance_scale * (noise_prediction_text - noise_pred_uncond)
+            latents = model.scheduler.step(noise_pred, t, latents)["prev_sample"]
+            latents = controller.step_callback(latents)
+            return latents
+
     # Use original P2P guidance step (same as regular p2p_guidance_diffusion_step)
     if low_resource:
         noise_pred_uncond = model.unet(latents, t, encoder_hidden_states=context[0])["sample"]

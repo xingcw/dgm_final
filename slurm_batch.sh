@@ -5,7 +5,7 @@
 #SBATCH -N 1                # Number of nodes requested.
 #SBATCH -n 1                # Number of tasks (i.e. processes).
 #SBATCH --cpus-per-task=8   # Number of cores per task.
-#SBATCH --gres=gpu:l40s:2   # Number of GPUs.
+#SBATCH --gres=gpu:l40s:1   # Number of GPUs.
 #SBATCH -t 0-12:00:00                # Time requested (D-HH:MM).
 #SBATCH --mem=32G                    # Memory requested.
 #SBATCH --nodelist=al-l40s-0.grasp.maas    # Uncomment if you need a specific machine.

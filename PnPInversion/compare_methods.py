@@ -1,19 +1,24 @@
 """
 Statistical comparison of image editing methods.
 
+Supports side-by-side tables and LaTeX output for comparing multiple methods.
+
 Usage:
-    # Compare two CSV files (same method name, different runs/configs):
-    python compare_methods.py --csv1 evaluation_result.csv --csv2 evaluation_result_original_p2p.csv
-    
-    # Compare multiple CSV files:
+    # Compare multiple CSV files (methods auto-detected):
     python compare_methods.py --csvs file1.csv file2.csv file3.csv
     
+    # Compare multiple CSV files with specific methods:
+    python compare_methods.py --csvs file1.csv file2.csv --methods method1 method2
+    
     # Compare two methods within the same CSV file:
-    python compare_methods.py --csv1 evaluation_result.csv --method1 "1_directinversion+p2p" --method2 "1_ddim+p2p"
+    python compare_methods.py --csvs file.csv file.csv --methods "1_directinversion+p2p" "1_ddim+p2p"
     
     # Specify output file for results:
-    python compare_methods.py --csv1 file1.csv --csv2 file2.csv --output comparison_results.txt
-    python compare_methods.py --csvs file1.csv file2.csv file3.csv --output comparison_results.txt
+    python compare_methods.py --csvs file1.csv file2.csv --output comparison_results.txt
+    
+    # Generate LaTeX table:
+    python compare_methods.py --csvs file1.csv file2.csv file3.csv --latex comparison_table.tex
+    python compare_methods.py --csvs file.csv file.csv --methods method1 method2 --latex comparison_table.tex
 """
 
 import argparse
@@ -325,138 +330,23 @@ def print_single_method_statistics(df, method_name, output=None):
         sys.stdout = old_stdout
 
 
-def compare_methods(csv1=None, csv2=None, method1=None, method2=None, csvs=None, output=None, latex_output=None):
+def compare_methods(csvs, methods=None, output=None, latex_output=None):
     """
     Main comparison function.
     
-    If csvs is provided: compare all pairs of files in csvs list
-    If csv2 is provided: compare same method across two files
-    If method2 is provided: compare two methods within csv1
-    If only method1 is provided: print statistics for single method
+    Compare multiple CSV files with optional method names.
+    
+    Args:
+        csvs: List of CSV file paths (required, at least 2 for comparison)
+        methods: Optional list of method names (one per CSV file, or None to auto-detect)
+        output: Optional output file path for text results
+        latex_output: Optional output file path for LaTeX table code
     """
+    if csvs is None or len(csvs) < 2:
+        raise ValueError("Must provide at least 2 CSV files for comparison")
     
-    # Handle multiple CSV files
-    if csvs is not None and len(csvs) >= 2:
-        return compare_multiple_methods(csvs, output, latex_output)
-    
-    # Handle single method statistics
-    if csv1 is not None and csv2 is None and method2 is None and method1 is not None:
-        df, name = load_and_extract(csv1, method1)
-        if len(df.columns) <= 1:  # Only file_id
-            raise ValueError(f"Method '{method1}' not found in CSV file")
-        print_single_method_statistics(df, method1 or name, output)
-        return None
-    
-    # Handle legacy two-file comparison
-    if csv2 is None and method2 is None:
-        raise ValueError("Must provide either csv2, method2, or csvs for comparison")
-    
-    # Load data
-    df1, name1 = load_and_extract(csv1, method1)
-    
-    if csv2 is not None:
-        df2, name2 = load_and_extract(csv2, method2)
-        label1 = f"{name1} (file1)"
-        label2 = f"{name2} (file2)"
-    elif method2 is not None:
-        df2, name2 = load_and_extract(csv1, method2)
-        label1 = name1
-        label2 = name2
-    
-    # Get common metrics
-    metrics1 = set(df1.columns) - {'file_id'}
-    metrics2 = set(df2.columns) - {'file_id'}
-    common_metrics = sorted(metrics1 & metrics2)
-    
-    # Compare the two methods
-    results, summary_table, merged = compare_two_methods(df1, df2, label1, label2, common_metrics)
-    
-    print("=" * 80)
-    print("STATISTICAL COMPARISON OF IMAGE EDITING METHODS")
-    print("=" * 80)
-    print(f"\nMethod 1: {label1}")
-    print(f"Method 2: {label2}")
-    print(f"Total paired samples: {len(merged)}")
-    print()
-    
-    # Print summary table
-    headers = ["Metric", "Method 1", "Method 2", "Diff", "p-value", "W1/W2/T", "Win%", "Winner"]
-    print(tabulate(summary_table, headers=headers, tablefmt="grid"))
-    
-    print("\n" + "=" * 80)
-    print("LEGEND")
-    print("=" * 80)
-    print("↑ = Higher is better, ↓ = Lower is better")
-    print("Diff = Mean(Method1) - Mean(Method2)")
-    print("W1/W2/T = Wins for Method1 / Wins for Method2 / Ties")
-    print("Win% = Percentage of images where Method 1 is better")
-    print("Significance: * p<0.05, ** p<0.01, *** p<0.001")
-    
-    # Detailed per-metric analysis
-    print("\n" + "=" * 80)
-    print("DETAILED ANALYSIS")
-    print("=" * 80)
-    
-    for r in results:
-        metric = r['metric']
-        s1, s2 = r['stats1'], r['stats2']
-        c = r['comparison']
-        
-        desc = METRIC_INFO.get(metric, (True, metric))[1]
-        
-        print(f"\n{metric}")
-        print(f"  Description: {desc}")
-        print(f"  Method 1: mean={s1['mean']:.4f}, std={s1['std']:.4f}, median={s1['median']:.4f}")
-        print(f"  Method 2: mean={s2['mean']:.4f}, std={s2['std']:.4f}, median={s2['median']:.4f}")
-        print(f"  Paired samples: {c['n_paired']}")
-        print(f"  Mean difference: {c['mean_diff']:+.4f}")
-        print(f"  Effect size (Cohen's d): {c['effect_size']:.4f}")
-        print(f"  Paired t-test: t={c['t_stat']:.4f}, p={c['t_pvalue']:.4f}{significance_stars(c['t_pvalue'])}")
-        print(f"  Wilcoxon test: W={c['wilcoxon_stat']:.4f}, p={c['wilcoxon_pvalue']:.4f}{significance_stars(c['wilcoxon_pvalue'])}")
-        print(f"  Win rate: Method1={c['wins_1']}, Method2={c['wins_2']}, Ties={c['ties']}")
-        print(f"  Conclusion: {r['winner']}")
-    
-    # Overall summary
-    print("\n" + "=" * 80)
-    print("OVERALL SUMMARY")
-    print("=" * 80)
-    
-    method1_wins = sum(1 for r in results if r['winner'] == label1)
-    method2_wins = sum(1 for r in results if r['winner'] == label2)
-    no_diff = sum(1 for r in results if r['winner'] == "No sig. diff.")
-    
-    print(f"Metrics where {label1} is significantly better: {method1_wins}")
-    print(f"Metrics where {label2} is significantly better: {method2_wins}")
-    print(f"Metrics with no significant difference: {no_diff}")
-    
-    # Save to file if requested
-    if output:
-        import sys
-        from io import StringIO
-        
-        # Capture output
-        old_stdout = sys.stdout
-        sys.stdout = StringIO()
-        
-        # Re-run print statements (simplified version for file)
-        print("=" * 80)
-        print("STATISTICAL COMPARISON OF IMAGE EDITING METHODS")
-        print("=" * 80)
-        print(f"\nMethod 1: {label1}")
-        print(f"Method 2: {label2}")
-        print(f"Total paired samples: {len(merged)}")
-        print()
-        print(tabulate(summary_table, headers=headers, tablefmt="grid"))
-        print(f"\nOverall: {label1}={method1_wins} wins, {label2}={method2_wins} wins, No diff={no_diff}")
-        
-        output_str = sys.stdout.getvalue()
-        sys.stdout = old_stdout
-        
-        with open(output, 'w') as f:
-            f.write(output_str)
-        print(f"\nResults saved to: {output}")
-    
-    return results
+    # Use multiple files comparison mode
+    return compare_multiple_methods(csvs, output, latex_output, method_names=methods)
 
 
 def format_value_for_table(value, metric_name, scale_factor=1.0, decimals=2):
@@ -544,16 +434,8 @@ def create_latex_table(dataframes, labels, common_metrics, baseline_idx=0):
         ]
     }
     
-    # Extract method names from labels
-    method_names = []
-    editing_method = "direct inversion + p2p"
-    
-    for label in labels:
-        match = re.search(r'sd\d+', label.lower())
-        if match:
-            method_names.append(match.group().upper())
-        else:
-            method_names.append(label)
+    # Use labels directly as method names
+    method_names = labels.copy()
     
     # Count total columns: Method column (Inverse/Editing) + metric columns
     num_metric_cols = sum(len(metrics_list) for metrics_list in metric_groups.values())
@@ -766,93 +648,84 @@ def create_side_by_side_table(dataframes, labels, common_metrics, baseline_idx=0
         ]
     }
     
-    # Extract method names from labels
-    method_names = []
-    editing_method = "direct inversion + p2p"  # Common editing method
+    # Use labels directly as method names
+    method_names = labels.copy()
     
-    for label in labels:
-        # Try to extract method name from label
-        match = re.search(r'sd\d+', label.lower())
-        if match:
-            method_names.append(match.group().upper())
-        else:
-            method_names.append(label)
-    
-    # Build table structure: rows are metrics, columns are methods
+    # Build table structure: methods as rows, metrics as columns (to match LaTeX format)
     table_rows = []
     
-    # Header row 1: Main categories spanning method columns
-    header1 = ['Method'] + [''] * len(method_names)  # Method column + empty cells for method columns
+    # Collect all metrics in order
+    all_metrics_ordered = []
+    for group_name, metrics_list in metric_groups.items():
+        for metric_key, scale, decimals, display_name in metrics_list:
+            if metric_key in common_metrics:
+                all_metrics_ordered.append((metric_key, scale, decimals, display_name, group_name))
+    
+    # Header row 1: Method column + metric group names spanning their columns
+    header1 = ['Method']
+    current_col = 1
+    group_spans = {}
     for group_name in metric_groups.keys():
-        num_cols = len(metric_groups[group_name])
-        header1.append(group_name)
-        header1.extend([''] * (num_cols - 1))
+        num_cols = len([m for m in all_metrics_ordered if m[4] == group_name])
+        if num_cols > 0:
+            group_spans[group_name] = (current_col, current_col + num_cols - 1)
+            header1.extend([group_name] + [''] * (num_cols - 1))
+            current_col += num_cols
     table_rows.append(header1)
     
-    # Header row 2: Inverse row with method names
-    header2 = ['Inverse'] + method_names  # All methods shown
-    for group_name, metrics_list in metric_groups.items():
-        for metric_key, scale, decimals, display_name in metrics_list:
-            header2.append(display_name)
+    # Header row 2: Empty method column + metric display names
+    header2 = ['']  # Empty for method column
+    for metric_key, scale, decimals, display_name, group_name in all_metrics_ordered:
+        header2.append(display_name)
     table_rows.append(header2)
     
-    # Header row 3: Editing method row
-    header3 = ['Editing'] + [editing_method] * len(method_names)
-    for group_name, metrics_list in metric_groups.items():
-        for metric_key, scale, decimals, display_name in metrics_list:
-            header3.append('')
-    table_rows.append(header3)
-    
-    # Data rows: one row per metric
-    for group_name, metrics_list in metric_groups.items():
-        for metric_key, scale, decimals, display_name in metrics_list:
-            if metric_key not in common_metrics:
-                continue
-            
-            # First column is empty (for Method column structure)
-            row = ['']
-            
-            # Add values for each method
-            for idx, method_name in enumerate(method_names):
-                if metric_key in method_stats[idx]:
-                    mean_val = method_stats[idx][metric_key]['mean']
-                    if not pd.isna(mean_val):
-                        formatted_val = format_value_for_table(mean_val, metric_key, scale, decimals)
-                        
-                        # Calculate percentage change relative to baseline
-                        if idx != baseline_idx:
-                            baseline_mean = method_stats[baseline_idx][metric_key]['mean']
-                            if not pd.isna(baseline_mean) and baseline_mean != 0:
-                                higher_is_better = METRIC_INFO.get(metric_key, (True, ""))[0]
-                                pct_change, direction = calculate_percentage_change(baseline_mean, mean_val, higher_is_better)
-                                
-                                if pct_change is not None:
-                                    # Format: value with percentage change
-                                    # Use 1 decimal place for small values, integer for larger ones
-                                    abs_pct = abs(pct_change)
-                                    if abs_pct < 1.0:
-                                        pct_str = f"{abs_pct:.1f}"
-                                    else:
-                                        pct_str = f"{int(abs_pct)}"
-                                    row.append(f"{formatted_val} ({pct_str}%{direction})")
+    # Data rows: one row per method
+    # Each row: [method name] + [value for metric1] + [value for metric2] + ...
+    for idx, method_name in enumerate(method_names):
+        # First column is the method name
+        row = [method_name]
+        
+        # Add values for each metric (these go in the metric columns)
+        for metric_key, scale, decimals, display_name, group_name in all_metrics_ordered:
+            if metric_key in method_stats[idx]:
+                mean_val = method_stats[idx][metric_key]['mean']
+                if not pd.isna(mean_val):
+                    formatted_val = format_value_for_table(mean_val, metric_key, scale, decimals)
+                    
+                    # Calculate percentage change relative to baseline
+                    if idx != baseline_idx:
+                        baseline_mean = method_stats[baseline_idx][metric_key]['mean']
+                        if not pd.isna(baseline_mean) and baseline_mean != 0:
+                            higher_is_better = METRIC_INFO.get(metric_key, (True, ""))[0]
+                            pct_change, direction = calculate_percentage_change(baseline_mean, mean_val, higher_is_better)
+                            
+                            if pct_change is not None:
+                                # Format: value with percentage change
+                                # Use 1 decimal place for small values, integer for larger ones
+                                abs_pct = abs(pct_change)
+                                if abs_pct < 1.0:
+                                    pct_str = f"{abs_pct:.1f}"
                                 else:
-                                    row.append(formatted_val)
+                                    pct_str = f"{int(abs_pct)}"
+                                row.append(f"{formatted_val} ({pct_str}%{direction})")
                             else:
                                 row.append(formatted_val)
                         else:
-                            # Baseline method - no percentage change
                             row.append(formatted_val)
                     else:
-                        row.append("N/A")
+                        # Baseline method - no percentage change
+                        row.append(formatted_val)
                 else:
                     row.append("N/A")
-            
-            table_rows.append(row)
+            else:
+                row.append("N/A")
+        
+        table_rows.append(row)
     
     return table_rows, len(common_file_ids)
 
 
-def compare_multiple_methods(csvs, output=None, latex_output=None):
+def compare_multiple_methods(csvs, output=None, latex_output=None, method_names=None):
     """
     Compare multiple CSV files pairwise and in side-by-side format.
     
@@ -860,6 +733,7 @@ def compare_multiple_methods(csvs, output=None, latex_output=None):
         csvs: List of CSV file paths
         output: Optional output file path for text results
         latex_output: Optional output file path for LaTeX table code
+        method_names: Optional list of method names to extract from each CSV (one per CSV file)
     """
     import os
     
@@ -867,18 +741,29 @@ def compare_multiple_methods(csvs, output=None, latex_output=None):
     dataframes = []
     labels = []
     
+    if method_names is None:
+        method_names = [None] * len(csvs)
+    elif len(method_names) != len(csvs):
+        raise ValueError(f"method_names length ({len(method_names)}) must match csvs length ({len(csvs)})")
+    
     for i, csv_path in enumerate(csvs):
-        df, name = load_and_extract(csv_path, None)
-        # Use filename as label if name is None
-        if name is None:
-            name = os.path.basename(csv_path).replace('.csv', '')
-        # Try to extract method name (e.g., sd14, sd15, sd21)
-        import re
-        match = re.search(r'sd\d+', name.lower())
-        if match:
-            label = match.group().upper()
+        method_name = method_names[i]
+        df, name = load_and_extract(csv_path, method_name)
+        
+        # Use method_name if provided, otherwise use extracted name or filename
+        if method_name is not None:
+            label = method_name
+        elif name is not None:
+            # Try to extract method name (e.g., sd14, sd15, sd21)
+            import re
+            match = re.search(r'sd\d+', name.lower())
+            if match:
+                label = match.group().upper()
+            else:
+                label = name
         else:
-            label = name
+            label = os.path.basename(csv_path).replace('.csv', '')
+        
         dataframes.append(df)
         labels.append(label)
     
@@ -920,11 +805,11 @@ def compare_multiple_methods(csvs, output=None, latex_output=None):
                     col_widths[i] = max(col_widths[i], len(str(cell)) + 2)  # Add padding
         
         # Print header rows
-        if len(table_rows) >= 3:
-            # Header row 1
+        if len(table_rows) >= 2:
+            # Header row 1: Method column + metric group names
             header1 = table_rows[0]
+            # Header row 2: Empty + metric display names
             header2 = table_rows[1]
-            header3 = table_rows[2]
             
             # Print header 1 with proper spacing
             header1_str = " | ".join(str(cell).center(col_widths[i]) if i < len(header1) else "".center(col_widths[i]) 
@@ -940,16 +825,11 @@ def compare_multiple_methods(csvs, output=None, latex_output=None):
                                     for i, cell in enumerate(header2[:len(col_widths)]))
             print(header2_str)
             
-            # Print header 3
-            header3_str = " | ".join(str(cell).center(col_widths[i]) if i < len(header3) else "".center(col_widths[i]) 
-                                    for i, cell in enumerate(header3[:len(col_widths)]))
-            print(header3_str)
-            
             # Print separator
             print(separator)
             
-            # Print data rows
-            for row in table_rows[3:]:
+            # Print data rows (methods as rows)
+            for row in table_rows[2:]:
                 row_str = " | ".join(str(cell).rjust(col_widths[i]) if i < len(row) else "".rjust(col_widths[i]) 
                                      for i, cell in enumerate(row[:len(col_widths)]))
                 print(row_str)
@@ -1076,10 +956,9 @@ def compare_multiple_methods(csvs, output=None, latex_output=None):
                     if i < len(col_widths):
                         col_widths[i] = max(col_widths[i], len(str(cell)) + 2)  # Add padding
             
-            if len(table_rows) >= 3:
+            if len(table_rows) >= 2:
                 header1 = table_rows[0]
                 header2 = table_rows[1]
-                header3 = table_rows[2]
                 
                 header1_str = " | ".join(str(cell).center(col_widths[i]) if i < len(header1) else "".center(col_widths[i]) 
                                         for i, cell in enumerate(header1[:len(col_widths)]))
@@ -1092,13 +971,9 @@ def compare_multiple_methods(csvs, output=None, latex_output=None):
                                         for i, cell in enumerate(header2[:len(col_widths)]))
                 print(header2_str)
                 
-                header3_str = " | ".join(str(cell).center(col_widths[i]) if i < len(header3) else "".center(col_widths[i]) 
-                                        for i, cell in enumerate(header3[:len(col_widths)]))
-                print(header3_str)
-                
                 print(separator)
                 
-                for row in table_rows[3:]:
+                for row in table_rows[2:]:
                     row_str = " | ".join(str(cell).rjust(col_widths[i]) if i < len(row) else "".rjust(col_widths[i]) 
                                          for i, cell in enumerate(row[:len(col_widths)]))
                     print(row_str)
@@ -1143,16 +1018,10 @@ def compare_multiple_methods(csvs, output=None, latex_output=None):
 
 def main():
     parser = argparse.ArgumentParser(description="Compare image editing methods statistically")
-    parser.add_argument('--csv1', type=str, default=None,
-                        help="Path to first CSV file with evaluation results (legacy, use --csvs for multiple files)")
-    parser.add_argument('--csv2', type=str, default=None,
-                        help="Path to second CSV file (for comparing same method across files)")
-    parser.add_argument('--csvs', type=str, nargs='+', default=None,
-                        help="Paths to multiple CSV files for pairwise comparison")
-    parser.add_argument('--method1', type=str, default=None,
-                        help="Name of first method (auto-detected if not provided)")
-    parser.add_argument('--method2', type=str, default=None,
-                        help="Name of second method (for comparing methods within same file)")
+    parser.add_argument('--csvs', type=str, nargs='+', required=True,
+                        help="Paths to CSV files for comparison (at least 2 required)")
+    parser.add_argument('--methods', type=str, nargs='+', default=None,
+                        help="Optional method names (one per CSV file, auto-detected if not provided)")
     parser.add_argument('--output', type=str, default=None,
                         help="Path to save comparison results")
     parser.add_argument('--latex', type=str, default=None,
@@ -1160,22 +1029,15 @@ def main():
     
     args = parser.parse_args()
     
-    # Determine which mode to use
-    if args.csvs is not None and len(args.csvs) >= 2:
-        # Multiple files mode
-        compare_methods(csvs=args.csvs, output=args.output, latex_output=args.latex)
-    elif args.csv1 is not None:
-        # Single method mode (if only method1 provided) or two-file comparison mode
-        if args.csv2 is None and args.method2 is None and args.method1 is not None:
-            # Single method statistics mode
-            compare_methods(args.csv1, None, args.method1, None, output=args.output)
-        elif args.csv2 is None and args.method2 is None:
-            parser.error("Must provide either --csv2, --method2, or --method1 for single method statistics")
-        else:
-            # Two-file comparison mode
-            compare_methods(args.csv1, args.csv2, args.method1, args.method2, output=args.output)
-    else:
-        parser.error("Must provide either --csvs (for multiple files) or --csv1 (for single/two files)")
+    # Validate arguments
+    if len(args.csvs) < 2:
+        parser.error("Must provide at least 2 CSV files for comparison")
+    
+    if args.methods is not None and len(args.methods) != len(args.csvs):
+        parser.error(f"Number of methods ({len(args.methods)}) must match number of CSV files ({len(args.csvs)})")
+    
+    # Run comparison
+    compare_methods(csvs=args.csvs, methods=args.methods, output=args.output, latex_output=args.latex)
 
 
 if __name__ == "__main__":

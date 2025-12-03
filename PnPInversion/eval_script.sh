@@ -25,6 +25,7 @@ python evaluation/evaluate.py --metrics "structure_distance" \
     --tgt_image_folders output/${MODEL_TYPE}_${MODEL_POSTFIX}/directinversion+p2p/annotation_images
 
 python compare_methods.py \
-    --csv1 results/evaluation_result_${MODEL_TYPE}_${MODEL_POSTFIX}.csv --csv2 results/evaluation_result_sd14.csv \
-    --method1 "${MODEL_TYPE}_directinversion+p2p" --method2 "sd14_directinversion+p2p" \
-    --output comparison_results_${MODEL_TYPE}_${MODEL_POSTFIX}_vs_sd14.txt
+    --csvs results/evaluation_result_sd14_wo_guidance.csv results/evaluation_result_${MODEL_TYPE}_${MODEL_POSTFIX}.csv\
+    --methods "sd14_wo_guidance_directinversion+p2p" "${MODEL_TYPE}_${MODEL_POSTFIX}_directinversion+p2p" \
+    --output results/comparison_results_${MODEL_TYPE}_${MODEL_POSTFIX}_vs_sd14_wo_guidance.txt \
+    --latex results/comparison_results_${MODEL_TYPE}_${MODEL_POSTFIX}_vs_sd14_wo_guidance.tex

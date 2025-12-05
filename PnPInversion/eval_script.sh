@@ -10,28 +10,48 @@ export MODEL_NAME=sd15
 
 # python run_editing_controlnet.py \
 #     --data_path data \
-#     --output_path output/${MODEL_NAME}/fallback_sam+controlnet+p2p \
-#     --edit_category_list 0 \
+#     --output_path output/controlnet/sam \
+#     --edit_category_list 0 1 2 3 4 5 6 7 8 9 \
 #     --conditioning_scale 0.3 \
-#     --controlnet_end_ratio 1.0 \
+#     --controlnet_end_ratio 0.5 \
 #     --use_sam
 
-python run_editing_p2p.py \
+python run_editing_controlnet.py \
     --data_path data \
-    --output_path output/directinversion+p2p \
-    --edit_category_list 0 \
-    --edit_method_list directinversion+p2p
+    --edit_category_list 0 1 2 3 4 5 6 7 8 9 \
+    --output_path output/controlnet/ddim \
+    --conditioning_scale 0.3 \
+    --controlnet_end_ratio 1.0 \
+    --inversion_method ddim \
+    --use_sam  # or omit for Canny edges
 
-# python evaluation/evaluate.py --metrics "structure_distance" \
-#     "psnr_unedit_part" "lpips_unedit_part" "mse_unedit_part" \
-#     "ssim_unedit_part" "clip_similarity_source_image" \
-#     "clip_similarity_target_image" "clip_similarity_target_image_edit_part" \
-#     --result_path results/evaluation_result_directinversion+p2p.csv \
+# python run_editing_p2p.py \
+#     --data_path data \
+#     --output_path output/directinversion+p2p \
 #     --edit_category_list 5 \
-#     --tgt_methods 1_directinversion+p2p \
-#     --tgt_image_folders output/directinversion+p2p/annotation_images
+#     --edit_method_list directinversion+p2p
 
-# python compare_methods.py \
-#     --csv1 results/evaluation_result_sd15_0.3sam.csv --csv2 results/evaluation_result_sd15_category5.csv \
-#     --method1 "sam+controlnet+p2p" --method2 "directinversion+p2p" \
-#     --output results/comparison_results_sam+controlnet+p2p_vs_directinversion+p2p.txt
+python evaluation/evaluate.py --metrics "structure_distance" \
+    "psnr_unedit_part" "lpips_unedit_part" "mse_unedit_part" \
+    "ssim_unedit_part" "clip_similarity_source_image" \
+    "clip_similarity_target_image" "clip_similarity_target_image_edit_part" \
+    --result_path results/evaluation_result_ddim+controlnet+p2p.csv \
+    --edit_category_list 0 1 2 3 4 5 6 7 8 9 \
+    --tgt_methods 1_ddim+controlnet+p2p \
+    --tgt_image_folders output/controlnet/ddim/sam+ddim+controlnet+p2p/annotation_images
+
+python evaluation/evaluate.py --metrics "structure_distance" \
+    "psnr_unedit_part" "lpips_unedit_part" "mse_unedit_part" \
+    "ssim_unedit_part" "clip_similarity_source_image" \
+    "clip_similarity_target_image" "clip_similarity_target_image_edit_part" \
+    --result_path results/evaluation_result_ddim+p2p.csv \
+    --edit_category_list 0 1 2 3 4 5 6 7 8 9 \
+    --tgt_methods 1_ddim+p2p \
+    --tgt_image_folders output/ddim+p2p/annotation_images
+
+
+python compare_methods.py \
+    --csv1 results/evaluation_result_ddim+p2p.csv --csv2 results/evaluation_result_ddim+controlnet+p2p.csv \
+    --method1 "ddim+p2p" --method2 "ddim+controlnet+p2p" \
+    --output results/comparison_results_ddim+p2p_vs_ddim+controlnet+p2p_all.txt \
+    --latex results/comparison_ddim_all.tex

@@ -644,3 +644,94 @@ def p2p_guidance_forward_controlnet(
         )
         
     return latents, latent
+
+
+@torch.no_grad()
+def p2p_guidance_forward_controlnet_multi(
+    model,
+    prompt,
+    controller,
+    num_inference_steps: int = 50,
+    guidance_scale = 7.5,
+    generator = None,
+    latent = None,
+    uncond_embeddings=None,
+    controlnet_conditioning_images_multi=None,
+    controlnet_conditioning_scale=1.0,
+    controlnet_end_ratio=1.0,
+):
+    """P2P guidance forward with multi-level ControlNet support for DDIM inversion.
+    
+    This function supports:
+    - Multi-level conditioning images (coarse/medium/fine) for different denoising stages
+    - controlnet_end_ratio to stop ControlNet after a certain percentage of steps
+    
+    Args:
+        controlnet_conditioning_images_multi: Dict with 'coarse', 'medium', 'fine' conditioning images
+            - 'coarse': For early steps (global structure)
+            - 'medium': For middle steps (balanced)
+            - 'fine': For late steps (details)
+        controlnet_end_ratio: Ratio of steps to apply ControlNet (0.0-1.0).
+                              E.g., 0.5 means ControlNet only for first 50% of steps.
+    """
+    batch_size = len(prompt)
+    register_attention_control(model, controller)
+    height = width = 512
+    
+    text_input = model.tokenizer(
+        prompt,
+        padding="max_length",
+        max_length=model.tokenizer.model_max_length,
+        truncation=True,
+        return_tensors="pt",
+    )
+    text_embeddings = model.text_encoder(text_input.input_ids.to(model.device))[0]
+    max_length = text_input.input_ids.shape[-1]
+    if uncond_embeddings is None:
+        uncond_input = model.tokenizer(
+            [""] * batch_size, padding="max_length", max_length=max_length, return_tensors="pt"
+        )
+        uncond_embeddings_ = model.text_encoder(uncond_input.input_ids.to(model.device))[0]
+    else:
+        uncond_embeddings_ = None
+
+    latent, latents = init_latent(latent, model, height, width, generator, batch_size)
+    model.scheduler.set_timesteps(num_inference_steps)
+    
+    # Calculate which step to stop using ControlNet
+    controlnet_end_step = int(num_inference_steps * controlnet_end_ratio)
+    
+    # Define stage boundaries for multi-level conditioning (relative to ControlNet active period)
+    # Early: 0% - 33% of ControlNet period -> coarse (global structure)
+    # Middle: 33% - 66% of ControlNet period -> medium (balanced)
+    # Late: 66% - 100% of ControlNet period -> fine (details)
+    early_end = int(controlnet_end_step * 0.33)
+    middle_end = int(controlnet_end_step * 0.66)
+    
+    for i, t in enumerate(model.scheduler.timesteps):
+        if uncond_embeddings_ is None:
+            context = torch.cat([uncond_embeddings[i].expand(*text_embeddings.shape), text_embeddings])
+        else:
+            context = torch.cat([uncond_embeddings_, text_embeddings])
+        
+        # Determine current ControlNet image and scale based on step
+        if i < controlnet_end_step and controlnet_conditioning_images_multi is not None:
+            # Select conditioning level based on denoising stage
+            if i < early_end:
+                current_controlnet_image = controlnet_conditioning_images_multi['coarse']
+            elif i < middle_end:
+                current_controlnet_image = controlnet_conditioning_images_multi['medium']
+            else:
+                current_controlnet_image = controlnet_conditioning_images_multi['fine']
+            current_controlnet_scale = controlnet_conditioning_scale
+        else:
+            # ControlNet disabled for this step
+            current_controlnet_image = None
+            current_controlnet_scale = 0.0
+        
+        latents = p2p_guidance_diffusion_step_controlnet(
+            model, controller, latents, context, t, guidance_scale,
+            current_controlnet_image, current_controlnet_scale, low_resource=False
+        )
+        
+    return latents, latent

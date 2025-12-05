@@ -2,7 +2,7 @@
 from models.p2p.scheduler_dev import DDIMSchedulerDev
 from models.p2p.inversion import NegativePromptInversion, NullInversion, DirectInversion
 from models.p2p.attention_control import EmptyControl, AttentionStore, make_controller
-from models.p2p.p2p_guidance_forward import p2p_guidance_forward, direct_inversion_p2p_guidance_forward, direct_inversion_p2p_guidance_forward_add_target,p2p_guidance_forward_single_branch, direct_inversion_p2p_guidance_forward_controlnet, p2p_guidance_forward_controlnet
+from models.p2p.p2p_guidance_forward import p2p_guidance_forward, direct_inversion_p2p_guidance_forward, direct_inversion_p2p_guidance_forward_add_target,p2p_guidance_forward_single_branch, direct_inversion_p2p_guidance_forward_controlnet, p2p_guidance_forward_controlnet, p2p_guidance_forward_controlnet_multi
 from models.p2p.proximal_guidance_forward import proximal_guidance_forward
 from diffusers import StableDiffusionControlNetPipeline, ControlNetModel, StableDiffusionPipeline
 from controlnet_aux import OpenposeDetector, SamDetector
@@ -147,6 +147,14 @@ class P2PEditor:
                                         detect_resolution=detect_resolution,
                                         include_hand_and_face=include_hand_and_face,
                                         controlnet_end_ratio=controlnet_end_ratio)
+        elif edit_method=="ddim+controlnet+p2p":
+            return self.edit_image_ddim_controlnet(image_path=image_path, prompt_src=prompt_src, prompt_tar=prompt_tar, guidance_scale=guidance_scale, 
+                                        cross_replace_steps=cross_replace_steps, self_replace_steps=self_replace_steps, 
+                                        blend_word=blend_word, eq_params=eq_params, is_replace_controller=is_replace_controller,
+                                        controlnet_conditioning_scale=controlnet_conditioning_scale,
+                                        detect_resolution=detect_resolution,
+                                        include_hand_and_face=include_hand_and_face,
+                                        controlnet_end_ratio=controlnet_end_ratio)
         elif edit_method in ["directinversion+p2p_guidance_0_1", "directinversion+p2p_guidance_0_5","directinversion+p2p_guidance_0_25", \
             "directinversion+p2p_guidance_0_75", "directinversion+p2p_guidance_1_1", "directinversion+p2p_guidance_1_5", "directinversion+p2p_guidance_1_25", \
                 "directinversion+p2p_guidance_1_75", "directinversion+p2p_guidance_25_1", "directinversion+p2p_guidance_25_5", "directinversion+p2p_guidance_25_25", \
@@ -276,6 +284,133 @@ class P2PEditor:
         images = latent2image(model=self.ldm_stable.vae, latents=latents)
 
         return Image.fromarray(np.concatenate((image_instruct, image_gt, reconstruct_image,images[-1]),axis=1))
+
+    def edit_image_ddim_controlnet(
+        self,
+        image_path,
+        prompt_src,
+        prompt_tar,
+        guidance_scale=7.5,
+        cross_replace_steps=0.4,
+        self_replace_steps=0.6,
+        blend_word=None,
+        eq_params=None,
+        is_replace_controller=False,
+        controlnet_conditioning_scale=1.0,
+        detect_resolution=512,
+        include_hand_and_face=True,
+        controlnet_end_ratio=0.5,
+    ):
+        """DDIM inversion with ControlNet and p2p editing.
+        
+        This method uses standard DDIM inversion (without direct inversion offsets)
+        combined with ControlNet guidance during the forward denoising pass.
+        
+        Args:
+            controlnet_end_ratio: Ratio of steps to apply ControlNet (0.0-1.0).
+                                  E.g., 0.5 means ControlNet only for first 50% of steps.
+        """
+        if not self.use_controlnet or self.controlnet is None:
+            raise ValueError("ControlNet is not initialized. Set use_controlnet=True when initializing P2PEditor.")
+        
+        image_gt = load_512(image_path)
+        prompts = [prompt_src, prompt_tar]
+
+        # Generate condition images for ControlNet
+        control_images_multi = None
+        condition_pil_multi = None
+        
+        if self.use_controlnet:
+            import torchvision.transforms as transforms
+            transform = transforms.Compose([
+                transforms.ToTensor(),
+            ])
+            
+            if self.use_sam and self.sam_detector is not None:
+                control_images_multi, condition_pil_multi = self._generate_sam_condition_images(
+                    image_gt, transform
+                )
+                print(f"Generated SAM segmentation images for ControlNet conditioning")
+            else:
+                control_images_multi, condition_pil_multi = self._generate_canny_condition_images(
+                    image_gt, transform
+                )
+
+        # Use DDIM inversion (NullInversion with num_inner_steps=0)
+        null_inversion = NullInversion(model=self.ldm_stable,
+                                    num_ddim_steps=self.num_ddim_steps)
+        _, _, x_stars, uncond_embeddings = null_inversion.invert(
+            image_gt=image_gt, prompt=prompt_src, guidance_scale=guidance_scale, num_inner_steps=0)
+        x_t = x_stars[-1]
+
+        # Reconstruction with ControlNet
+        controller = AttentionStore()
+        
+        print(f"DDIM+ControlNet - controlnet_conditioning_scale: {controlnet_conditioning_scale}")
+        print(f"DDIM+ControlNet - controlnet_end_ratio: {controlnet_end_ratio}")
+        
+        reconstruct_latent, _ = p2p_guidance_forward_controlnet_multi(
+            model=self.ldm_stable, 
+            prompt=[prompt_src], 
+            controller=controller, 
+            latent=x_t, 
+            num_inference_steps=self.num_ddim_steps, 
+            guidance_scale=guidance_scale, 
+            generator=None, 
+            uncond_embeddings=uncond_embeddings,
+            controlnet_conditioning_images_multi=control_images_multi,
+            controlnet_conditioning_scale=controlnet_conditioning_scale,
+            controlnet_end_ratio=controlnet_end_ratio,
+        )
+        
+        reconstruct_image = latent2image(model=self.ldm_stable.vae, latents=reconstruct_latent)[0]
+        image_instruct = txt_draw(f"source prompt: {prompt_src}\ntarget prompt: {prompt_tar}")
+        
+        ########## edit ##########
+        cross_replace_steps_dict = {
+            'default_': cross_replace_steps,
+        }
+
+        controller = make_controller(pipeline=self.ldm_stable,
+                                    prompts=prompts,
+                                    is_replace_controller=is_replace_controller,
+                                    cross_replace_steps=cross_replace_steps_dict,
+                                    self_replace_steps=self_replace_steps,
+                                    blend_words=blend_word,
+                                    equilizer_params=eq_params,
+                                    num_ddim_steps=self.num_ddim_steps,
+                                    device=self.device)
+        
+        latents, _ = p2p_guidance_forward_controlnet_multi(
+            model=self.ldm_stable, 
+            prompt=prompts, 
+            controller=controller, 
+            latent=x_t, 
+            num_inference_steps=self.num_ddim_steps, 
+            guidance_scale=guidance_scale, 
+            generator=None, 
+            uncond_embeddings=uncond_embeddings,
+            controlnet_conditioning_images_multi=control_images_multi,
+            controlnet_conditioning_scale=controlnet_conditioning_scale,
+            controlnet_end_ratio=controlnet_end_ratio,
+        )
+
+        images = latent2image(model=self.ldm_stable.vae, latents=latents)
+
+        # Get single condition image for visualization (use 'medium' level)
+        if condition_pil_multi is not None:
+            condition_image = np.array(condition_pil_multi['medium'])
+        else:
+            condition_image = np.zeros((512, 512, 3), dtype=np.uint8)
+
+        # Output: prompt | original | condition | reconstructed | edited
+        return Image.fromarray(np.concatenate((
+            image_instruct, 
+            image_gt, 
+            condition_image,
+            reconstruct_image,
+            images[-1]
+        ), axis=1))
 
     def edit_image_null_text_inversion(
         self,
@@ -1120,7 +1255,9 @@ class P2PEditor:
                                     num_ddim_steps=self.num_ddim_steps)
         
         # ========== Part 1: ControlNet + DirectInversion + P2P ==========
-        # Use ControlNet-aware offset calculation with SEPARATE offsets for source and target
+        # Use ControlNet-aware offset calculation that matches the forward pass exactly
+        # IMPORTANT: controlnet_end_ratio must be passed to ensure offset calculation
+        # uses the same stage boundaries as the forward diffusion
         _, _, x_stars, noise_loss_full, noise_loss_cfg_only = null_inversion.invert_with_controlnet_separate_offsets(
             image_gt=image_gt, 
             prompt=prompts,
@@ -1128,6 +1265,7 @@ class P2PEditor:
             controlnet=self.controlnet,
             controlnet_conditioning_images_multi=control_images_multi,
             controlnet_conditioning_scale=controlnet_conditioning_scale,
+            controlnet_end_ratio=controlnet_end_ratio,
         )
         x_t_controlnet = x_stars[-1]
 
@@ -1172,7 +1310,7 @@ class P2PEditor:
             model=self.ldm_stable, 
             prompt=prompts, 
             controller=controller_controlnet, 
-            noise_loss_list=noise_loss_full, 
+            noise_loss_list=noise_loss_cfg_only,  # Use CFG-only offset for editing (not full ControlNet offset)
             latent=x_t_controlnet,
             num_inference_steps=self.num_ddim_steps, 
             guidance_scale=guidance_scale, 
@@ -1186,38 +1324,38 @@ class P2PEditor:
         images_controlnet = latent2image(model=self.ldm_stable.vae, latents=latents_controlnet)
         edited_with_controlnet = images_controlnet[-1]
 
-        # ========== Part 2: DirectInversion + P2P (without ControlNet) ==========
-        # Get plain CFG-only offsets for comparison
-        _, _, x_stars_plain, noise_loss_plain = null_inversion.invert(
-            image_gt=image_gt, 
-            prompt=prompts,
-            guidance_scale=guidance_scale,
-        )
-        x_t_plain = x_stars_plain[-1]
+        # # ========== Part 2: DirectInversion + P2P (without ControlNet) ==========
+        # # Get plain CFG-only offsets for comparison
+        # _, _, x_stars_plain, noise_loss_plain = null_inversion.invert(
+        #     image_gt=image_gt, 
+        #     prompt=prompts,
+        #     guidance_scale=guidance_scale,
+        # )
+        # x_t_plain = x_stars_plain[-1]
 
-        controller_plain = make_controller(pipeline=self.ldm_stable,
-                                    prompts=prompts,
-                                    is_replace_controller=is_replace_controller,
-                                    cross_replace_steps=cross_replace_steps_dict,
-                                    self_replace_steps=self_replace_steps,
-                                    blend_words=blend_word,
-                                    equilizer_params=eq_params,
-                                    num_ddim_steps=self.num_ddim_steps,
-                                    device=self.device)
+        # controller_plain = make_controller(pipeline=self.ldm_stable,
+        #                             prompts=prompts,
+        #                             is_replace_controller=is_replace_controller,
+        #                             cross_replace_steps=cross_replace_steps_dict,
+        #                             self_replace_steps=self_replace_steps,
+        #                             blend_words=blend_word,
+        #                             equilizer_params=eq_params,
+        #                             num_ddim_steps=self.num_ddim_steps,
+        #                             device=self.device)
         
-        latents_plain, _ = direct_inversion_p2p_guidance_forward(
-            model=self.ldm_stable, 
-            prompt=prompts, 
-            controller=controller_plain, 
-            noise_loss_list=noise_loss_plain, 
-            latent=x_t_plain,
-            num_inference_steps=self.num_ddim_steps, 
-            guidance_scale=guidance_scale, 
-            generator=None,
-        )
+        # latents_plain, _ = direct_inversion_p2p_guidance_forward(
+        #     model=self.ldm_stable, 
+        #     prompt=prompts, 
+        #     controller=controller_plain, 
+        #     noise_loss_list=noise_loss_plain, 
+        #     latent=x_t_plain,
+        #     num_inference_steps=self.num_ddim_steps, 
+        #     guidance_scale=guidance_scale, 
+        #     generator=None,
+        # )
 
-        images_plain = latent2image(model=self.ldm_stable.vae, latents=latents_plain)
-        edited_without_controlnet = images_plain[-1]
+        # images_plain = latent2image(model=self.ldm_stable.vae, latents=latents_plain)
+        # edited_without_controlnet = images_plain[-1]
 
         # ========== Prepare output ==========
         image_instruct = txt_draw(f"source prompt: {prompt_src}\ntarget prompt: {prompt_tar}")
@@ -1234,8 +1372,7 @@ class P2PEditor:
             image_gt, 
             condition_image, 
             reconstruct_image, 
-            edited_with_controlnet,
-            edited_without_controlnet,
+            edited_with_controlnet
         ), axis=1))
     
     def _generate_canny_condition_images(self, image_gt, transform):
@@ -1250,10 +1387,11 @@ class P2PEditor:
         image_gray = cv2.cvtColor(image_gt, cv2.COLOR_RGB2GRAY)
         
         # Define threshold levels: (low_threshold, high_threshold)
+        # Standard Canny thresholds are typically in 50-200 range
         canny_thresholds = {
-            'coarse': (700, 800),   # Early steps: global structure only
-            'medium': (600, 700),   # Middle steps: moderate detail
-            'fine': (500, 600),     # Late steps: fine details
+            'coarse': (150, 250),   # Early steps: global structure only
+            'medium': (100, 200),   # Middle steps: moderate detail
+            'fine': (50, 150),      # Late steps: fine details
         }
         
         control_images_multi = {}
@@ -1274,9 +1412,9 @@ class P2PEditor:
             canny_pil_level = Image.fromarray(canny_image_rgb)
             condition_pil_multi[level] = canny_pil_level
             
-            # Convert PIL to tensor and normalize to [-1, 1]
+            # Convert PIL to tensor - ControlNet expects [0, 1] range
+            # ToTensor() already converts from [0, 255] to [0, 1]
             control_image_level = transform(canny_pil_level).unsqueeze(0).to(self.device)
-            control_image_level = control_image_level * 2.0 - 1.0
             
             # Ensure control image matches ControlNet dtype
             if self.controlnet is not None:
@@ -1317,9 +1455,9 @@ class P2PEditor:
             # Store PIL image for visualization
             condition_pil_multi[level] = sam_result.copy()
             
-            # Convert PIL to tensor and normalize to [-1, 1]
+            # Convert PIL to tensor - ControlNet expects [0, 1] range
+            # ToTensor() already converts from [0, 255] to [0, 1]
             control_image_level = transform(sam_result).unsqueeze(0).to(self.device)
-            control_image_level = control_image_level * 2.0 - 1.0
             
             # Ensure control image matches ControlNet dtype
             if self.controlnet is not None:

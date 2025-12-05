@@ -105,6 +105,13 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Use SAM (Segment Anything Model) for segmentation-based conditioning instead of Canny edges.",
     )
+    parser.add_argument(
+        "--inversion_method",
+        type=str,
+        default="directinversion",
+        choices=["directinversion", "ddim"],
+        help="Inversion method to use: 'directinversion' (default) or 'ddim'.",
+    )
     return parser.parse_args()
 
 
@@ -120,16 +127,22 @@ def main() -> None:
     # Initialize device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    # Determine output folder name based on conditioning mode
-    if args.use_sam:
-        image_save_path = "sam+controlnet+p2p"
-        print("Loading P2PEditor with SAM + ControlNet support...")
+    # Determine edit method based on inversion method
+    if args.inversion_method == "ddim":
+        edit_method = "ddim+controlnet+p2p"
     else:
-        image_save_path = "canny+controlnet+p2p"
-        print("Loading P2PEditor with Canny + ControlNet support...")
+        edit_method = "directinversion+controlnet+p2p"
+    
+    # Determine output folder name based on conditioning mode and inversion method
+    if args.use_sam:
+        image_save_path = f"sam+{args.inversion_method}+controlnet+p2p"
+        print(f"Loading P2PEditor with SAM + {args.inversion_method} + ControlNet support...")
+    else:
+        image_save_path = f"canny+{args.inversion_method}+controlnet+p2p"
+        print(f"Loading P2PEditor with Canny + {args.inversion_method} + ControlNet support...")
     
     editor = P2PEditor(
-        method_list=["directinversion+controlnet+p2p"],
+        method_list=[edit_method],
         device=device,
         num_ddim_steps=args.steps,
         controlnet_model=args.controlnet_model,
@@ -161,7 +174,7 @@ def main() -> None:
             try:
                 # Use P2PEditor with ControlNet+p2p
                 result_image = editor(
-                    edit_method="directinversion+controlnet+p2p",
+                    edit_method=edit_method,
                     image_path=image_path,
                     prompt_src=original_prompt,
                     prompt_tar=editing_prompt,

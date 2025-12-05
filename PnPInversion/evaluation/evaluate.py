@@ -107,6 +107,7 @@ all_tgt_image_folders={
     "1_stylediffusion+p2p":"output/stylediffusion+p2p/annotation_images",
     "1_directinversion+p2p":"output/directinversion+p2p/annotation_images",
     "1_directinversion+controlnet+p2p":"output/sd15/sam+controlnet+p2p/annotation_images",
+    "1_ddim+controlnet+p2p":"output/ddim+controlnet+p2p/annotation_images",
     # ---
     "1_ddim+masactrl":"output/ddim+masactrl/annotation_images",
     "1_directinversion+masactrl":"output/directinversion+masactrl/annotation_images",

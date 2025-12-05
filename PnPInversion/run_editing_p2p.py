@@ -76,7 +76,9 @@ image_save_paths={
     "ablation_null-text-inversion_single_branch+p2p":"ablation_null-text-inversion_single_branch+p2p",
     "ablation_directinversion_add-source+p2p":"ablation_directinversion_add-source+p2p",
     "ablation_directinversion_add-target+p2p":"ablation_directinversion_add-target+p2p",
-    "controlnet+p2p":"controlnet+p2p"
+    "controlnet+p2p":"controlnet+p2p",
+    "directinversion+controlnet+p2p":"directinversion+controlnet+p2p",
+    "ddim+controlnet+p2p":"ddim+controlnet+p2p"
     }
 
 

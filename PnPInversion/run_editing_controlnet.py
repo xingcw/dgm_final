@@ -1,13 +1,3 @@
-"""Structure-constrained editing with ControlNet and Prompt-to-Prompt (p2p).
-
-This script combines ControlNet with various conditioning methods (Canny edges or SAM segmentation)
-and p2p editing to maintain structural consistency during editing. 
-
-Conditioning modes:
-- Canny: Uses multi-level Canny edge detection with ControlNet canny model
-- SAM: Uses Segment Anything Model with ControlNet segmentation model
-"""
-
 from __future__ import annotations
 
 import argparse

@@ -1,10 +1,3 @@
-"""Benchmark inference time comparison between DDIM+P2P+ControlNet vs DirectInversion+P2P.
-
-This script measures and compares the inference time of two editing pipelines:
-1. DDIM + P2P + ControlNet (with ControlNet conditioning)
-2. DirectInversion + P2P (without ControlNet)
-"""
-
 import argparse
 import os
 import time
